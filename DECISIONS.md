@@ -49,3 +49,36 @@ requête.**
 `UserWallet.privateKeyRecoveryPayload(s)` existent dans le schéma mais ne
 sont jamais demandés par `acheteur/sorare/requetes.py` — aucune raison pour
 ce bot de lire une clé privée chiffrée, même en lecture seule.
+
+## 2026-09-20 — Lot L3
+
+**Population liquide : 5+ ventes en 30 jours.**
+PLAN.md dit « recalculée en Python par le bot » sans donner le critère exact.
+Choix : minimum 5 ventes dans les 30 derniers jours, injectable pour test. La
+fenêtre et l'effectif minimal sont des réglages — le premier tir mesurera si
+ces seuils donnent une population raisonnable à comparer avec ta feuille.
+
+**Référence de prix : médiane, 7 jours, min 3 ventes.**
+PLAN.md (ligne 368-370) laisse ouverts « médiane ou moyenne » et « fenêtre
+3-7 jours selon le joueur ». Choix : médiane (comme Pickdeck) sur 7 jours
+fixes, minimum 3 ventes. La fenêtre et le seuil sont injectables pour affiner
+après mesure. Les ventes hors-fenêtre sont ignorées. Tous les prix d'un
+joueur doivent être dans la même devise (erreur si mélange).
+
+**Seuil et paliers : 90%, puis 70/75/80%.**
+PLAN.md § 350-364 tranche complètement : filtre sous 90% de référence, puis
+escalade à 70%, 75%, 80% du prix demandé. Implémentation directe, pas
+d'hypothèse supplémentaire.
+
+**Groupage par vendeur : décote 65% au premier palier seulement.**
+PLAN.md (ligne 373) mentionne une « décote supplémentaire des offres groupées
+(65 % au lieu de 70 %) ». Implémentation : si on propose plusieurs cartes au
+même vendeur au premier palier, on offre 65% du prix demandé. Aux paliers
+suivants, le palier s'applique normalement. Le choix d'appliquer la décote
+**seulement** au premier palier rend la groupage intéressante au démarrage.
+
+**Fonctions pures, testables.**
+Tous les calculs vivent dans `acheteur/marche/` (population, référence) et
+`acheteur/decision/` (sélection, paliers, groupage, propositions). Zéro appel
+réseau, zéro écriture base : seuls les paramètres changent. 14 cas de test
+couvrent les chemins critiques et les bornes.
