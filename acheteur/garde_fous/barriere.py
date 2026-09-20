@@ -11,6 +11,7 @@ voie vers l'envoi.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,8 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from acheteur.core.horloge import Horloge
+
+logger = logging.getLogger(__name__)
 from acheteur.decision.proposition import PropositionGroupe, PropositionSimple
 from acheteur.garde_fous.regles import (
     GuardrailViolation,
@@ -33,6 +36,8 @@ from acheteur.garde_fous.regles import (
 )
 from acheteur.marche.devises import Devise, Montant
 from acheteur.negociation import enregistrer_ligne
+from acheteur.sorare.client import SorareClient
+from acheteur.paiement import preparation, signature
 
 
 @dataclass(frozen=True)
@@ -64,6 +69,7 @@ def envoyer_offre_proposal(
     cli_arg_mode_reel: bool = False,
     montant_retape: int | None = None,
     chemin_racine: Path = Path("."),
+    client: SorareClient | None = None,
 ) -> None:
     """Envoie une offre après vérification de tous les garde-fous.
 
@@ -202,8 +208,65 @@ def envoyer_offre_proposal(
 
     # === Mode réel : appel Sorare après écriture en base ===
     if not mode_simulation:
-        # TODO(L5) : appel aux mutations Sorare
-        # Pour l'instant, c'est un placeholder. L5 remplira ce code.
-        # Si l'appel échoue, la ligne reste dans le journal avec état ENVOYEE
-        # — la réconciliation la rattrapera au prochain cycle.
-        pass
+        if client is None:
+            raise ValueError(
+                "Mode réel exige un client Sorare. Passez client=... à envoyer_offre_proposal"
+            )
+
+        # L5 : préparation et signature
+        try:
+            prepared = preparation.preparer_offre(client, proposition)
+
+            # Vérifier s'il y a des erreurs de validation
+            if prepared.errors:
+                logger.error(
+                    "Erreurs de validation prepareOffer : %s",
+                    prepared.errors,
+                )
+                # Ne pas continuer si validation échoue
+                return
+
+            # Signer et envoyer
+            offre_creee = signature.envoyer_offre_signee(client, prepared)
+
+            # Récupérer le sorare_id de la réponse
+            if "createDirectOffer" in offre_creee:
+                payload = offre_creee["createDirectOffer"]
+                if "tokenOffer" in payload:
+                    sorare_id = payload["tokenOffer"].get("id")
+                    if sorare_id:
+                        # La ligne a déjà été enregistrée avec sorare_id=None
+                        # Mettre à jour avec le vrai ID
+                        # (La ligne la plus récente pour ce couple joueur/vendeur)
+                        from acheteur.negociation.journal import OffreJournal
+
+                        if isinstance(proposition, PropositionSimple):
+                            joueur_slug = proposition.annonce.joueur.slug
+                            vendeur_slug = proposition.annonce.vendeur_slug
+                        else:
+                            joueur_slug = proposition.annonces[0].joueur.slug
+                            vendeur_slug = proposition.annonces[0].vendeur_slug
+
+                        ligne = (
+                            session.query(OffreJournal)
+                            .filter_by(joueur_slug=joueur_slug, vendeur_slug=vendeur_slug)
+                            .order_by(OffreJournal.id.desc())
+                            .first()
+                        )
+                        if ligne:
+                            ligne.sorare_id = sorare_id
+                            ligne.maj_le = horloge.maintenant()
+                            session.flush()
+                            logger.info(
+                                "Offre envoyée : %s (sorare_id=%s)",
+                                joueur_slug,
+                                sorare_id,
+                            )
+
+                if "errors" in payload and payload["errors"]:
+                    logger.error("Erreurs createDirectOffer : %s", payload["errors"])
+
+        except Exception as exc:
+            # Si la mutation échoue, la ligne reste ENVOYEE et sera réconciliée
+            logger.error("Erreur lors de L5 (préparation/envoi) : %s", exc)
+            return
