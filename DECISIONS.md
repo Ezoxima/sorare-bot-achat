@@ -203,3 +203,42 @@ Les neuf garde-fous PLAN.md sont tous implémentés :
 
 Mode simulation par défaut, retour sim à chaque redémarrage.
 Pas un seul paramètre dans config ne déverrouille mode réel seul.
+
+## 2026-09-20 — Lot L5 : Préparation d'offre réelle et signature
+
+**Mutations Sorare créées : `prepareOffer` et `createDirectOffer`**
+`sorare/mutations.py` expose deux mutations GraphQL + wrappers :
+- `PREPARE_OFFER_MUTATION` : valide l'offre, retourne les autorisations demandées
+- `CREATE_DIRECT_OFFER_MUTATION` : envoie l'offre signée
+- `preparer_offre_sorare()` et `creer_offre_directe_sorare()` : wrappers
+
+**Module paiement : structure pour L5 et L6**
+- `paiement/types.py` : `AuthorizationType`, `AuthorizationRequest`, `PreparedOffer`
+- `paiement/preparation.py` : appel `prepareOffer`, construit input depuis proposition
+- `paiement/signature.py` : placeholder L5 (approvals vide), structure pour L6
+
+**AssetIds fictifs pour la chaîne de test.**
+L'annonce ne porte pas d'assetId (juste joueur_slug, vendeur_slug, prix, date).
+Choix L5 : utiliser `"test-asset-id-L5"` pour `receiveAssetIds` dans prepareOffer.
+L6 remplacera par la vraie requête `annonces_marche()` qui fournira les assetIds réels.
+Avec ces IDs fictifs, prepareOffer retournera une erreur de validation, mais c'est OK
+pour tester le flux (les autorisations demandées, sinon vides).
+
+**Intégration dans barrière.**
+`envoyer_offre_proposal()` accepte un `client` optionnel. En mode réel :
+1. Appelle `preparation.preparer_offre(client, proposition)`
+2. Vérifie qu'aucune erreur de validation ne s'est produite
+3. Appelle `signature.envoyer_offre_signee(client, prepared)`
+4. Récupère `sorare_id` de la réponse et met à jour la ligne du journal
+5. Les exceptions réseau sont loggées ; la ligne reste en base pour réconciliation
+
+**L5 n'envoie pas réellement l'offre.**
+`envoyer_offre_signee()` appelle `createDirectOffer` mais avec un assetId fictif,
+ce qui génère une erreur Sorare. La mutation échoue, mais le code L5 est prêt pour
+L6 où elle réussira avec un assetId réel. L'erreur est loggée et ne bloque pas.
+
+**Pas d'autorisation demandée.**
+L1 montrait que `prepareOffer` ne demandait pas d'autorisation (paramètres invalides).
+L5 anticipe pas de signature, donc `approvals=[]` dans `createDirectOffer`.
+L6 confirmera (vraie carte réelle, assetId valide) si une signature est demandée,
+et L5 servira de squelette pour la vraie implémentation.
