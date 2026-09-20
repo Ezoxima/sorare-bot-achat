@@ -1,0 +1,291 @@
+"""Tests du lot L2 : journal des offres + réconciliation en lecture seule."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
+
+from acheteur.core.db import Base
+from acheteur.marche.devises import Devise
+from acheteur.negociation.journal import (
+    EtatOffre,
+    MotifRefus,
+    OffreJournal,
+    enregistrer_ligne,
+    importer_ligne_manuelle,
+    lignes_ouvertes,
+)
+from acheteur.negociation.reconciliation import (
+    CRENEAU_SIGNATURE,
+    OffreSorareObservee,
+    apparier,
+    depuis_reponse_sorare,
+    etat_depuis_sorare,
+    motif_refus_depuis_sorare,
+)
+
+BASE = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def session():
+    moteur = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(moteur)
+    fabrique = sessionmaker(bind=moteur)
+    s = fabrique()
+    yield s
+    s.close()
+
+
+def _ligne_decidee(session: Session, **kwargs) -> OffreJournal:
+    defauts = dict(
+        joueur_slug="messi",
+        vendeur_slug="alice",
+        prix_demande_valeur=1000,
+        prix_demande_devise=Devise.EUR,
+        montant_offre_valeur=700,
+        montant_offre_devise=Devise.EUR,
+        reference_prix_valeur=1200,
+        reference_fenetre_jours=7,
+        reference_nb_ventes=3,
+        palier=70,
+        date_pose_annonce=BASE - timedelta(hours=2),
+        horloge_maintenant=BASE,
+        mode_simulation=True,
+    )
+    defauts.update(kwargs)
+    return enregistrer_ligne(session, **defauts)
+
+
+class TestContraintesBase:
+    """PLAN.md § L3 et § Garde-fous : contraintes en base, pas seulement dans le code."""
+
+    def test_palier_superieur_a_80_refuse(self, session: Session):
+        with pytest.raises(IntegrityError):
+            _ligne_decidee(session, palier=90)
+        session.rollback()
+
+    def test_reference_moins_de_3_ventes_refusee(self, session: Session):
+        with pytest.raises(IntegrityError):
+            _ligne_decidee(session, reference_nb_ventes=2)
+        session.rollback()
+
+    def test_ligne_simulee_avec_identifiant_sorare_refusee(self, session: Session):
+        with pytest.raises(IntegrityError):
+            _ligne_decidee(session, mode_simulation=True, sorare_id="abc123")
+        session.rollback()
+
+    def test_ligne_envoyee_avec_identifiant_sorare_acceptee(self, session: Session):
+        ligne = _ligne_decidee(session, mode_simulation=False, sorare_id="abc123")
+        assert ligne.sorare_id == "abc123"
+
+    def test_import_automatique_echappe_aux_contraintes_de_decision(self, session: Session):
+        """Une ligne importée n'a pas de palier ni de référence : ce n'est pas une
+        décision du bot, lui imposer ces contraintes ferait mentir la base."""
+        ligne = importer_ligne_manuelle(
+            session,
+            sorare_id="import-1",
+            joueur_slug="mbappe",
+            vendeur_slug="bob",
+            montant_offre_valeur=500,
+            montant_offre_devise=Devise.EUR,
+            etat=EtatOffre.ENVOYEE,
+            motif_refus=None,
+            reponse_brute=None,
+            creee_le=BASE,
+            horloge_maintenant=BASE,
+        )
+        assert ligne.palier is None
+        assert ligne.reference_nb_ventes is None
+        assert ligne.import_automatique is True
+
+    def test_deux_offres_ouvertes_sur_meme_joueur_vendeur_refusees(self, session: Session):
+        """L'unicité qui empêche physiquement un double envoi sur le même lot."""
+        _ligne_decidee(session, mode_simulation=True)
+        with pytest.raises(IntegrityError):
+            _ligne_decidee(session, mode_simulation=True)
+        session.rollback()
+
+    def test_deux_offres_sur_meme_joueur_vendeur_ok_si_la_premiere_est_close(
+        self, session: Session
+    ):
+        premiere = _ligne_decidee(session, mode_simulation=True)
+        premiere.etat = EtatOffre.EXPIREE
+        session.flush()
+        # Le couple (joueur, vendeur) est de nouveau libre.
+        seconde = _ligne_decidee(session, mode_simulation=True)
+        assert seconde.id != premiere.id
+
+    def test_deux_offres_ouvertes_sur_vendeurs_differents_ok(self, session: Session):
+        _ligne_decidee(session, vendeur_slug="alice", mode_simulation=True)
+        _ligne_decidee(session, vendeur_slug="bob", mode_simulation=True)
+        assert len(lignes_ouvertes(session)) == 2
+
+
+class TestApparierParIdentifiant:
+    def test_ligne_avec_sorare_id_connu_est_appariee(self, session: Session):
+        ligne = _ligne_decidee(session, mode_simulation=False, sorare_id="off-1")
+        offre = OffreSorareObservee(
+            sorare_id="off-1",
+            vendeur_slug="quelquun_dautre",  # signature différente : l'ID prime.
+            joueurs_slugs=("autre_joueur",),
+            montant_valeur=999,
+            montant_devise="EUR",
+            creee_le=BASE + timedelta(days=10),
+            etat_brut="OPENED",
+            motif_refus_brut=None,
+            reponse_brute={},
+        )
+        rapport = apparier([ligne], [offre])
+        assert rapport.appariees == [(ligne, offre)]
+        assert not rapport.a_importer
+        assert not rapport.ambigues
+
+
+class TestApparierParSignature:
+    def _offre(self, **kwargs) -> OffreSorareObservee:
+        defauts = dict(
+            sorare_id="off-1",
+            vendeur_slug="alice",
+            joueurs_slugs=("messi",),
+            montant_valeur=700,
+            montant_devise="EUR",
+            creee_le=BASE,
+            etat_brut="OPENED",
+            motif_refus_brut=None,
+            reponse_brute={},
+        )
+        defauts.update(kwargs)
+        return OffreSorareObservee(**defauts)
+
+    def test_signature_identique_dans_le_creneau_est_appariee(self, session: Session):
+        ligne = _ligne_decidee(session, mode_simulation=True)  # sorare_id=None
+        offre = self._offre(creee_le=ligne.cree_le + timedelta(minutes=5))
+        rapport = apparier([ligne], [offre])
+        assert rapport.appariees == [(ligne, offre)]
+
+    def test_hors_creneau_horaire_non_appariee_et_devient_a_importer(self, session: Session):
+        ligne = _ligne_decidee(session, mode_simulation=True)
+        offre = self._offre(creee_le=ligne.cree_le + CRENEAU_SIGNATURE + timedelta(minutes=1))
+        rapport = apparier([ligne], [offre])
+        assert not rapport.appariees
+        assert ligne in rapport.sans_contrepartie
+        assert offre in rapport.a_importer
+
+    def test_montant_different_non_apparie(self, session: Session):
+        ligne = _ligne_decidee(session, mode_simulation=True, montant_offre_valeur=700)
+        offre = self._offre(montant_valeur=750, creee_le=ligne.cree_le)
+        rapport = apparier([ligne], [offre])
+        assert not rapport.appariees
+        assert offre in rapport.a_importer
+
+    def test_deux_candidates_pour_une_ligne_sont_ambigues_pas_devinees(self, session: Session):
+        ligne = _ligne_decidee(session, mode_simulation=True)
+        offre_a = self._offre(sorare_id="off-a", creee_le=ligne.cree_le)
+        offre_b = self._offre(sorare_id="off-b", creee_le=ligne.cree_le + timedelta(minutes=1))
+        rapport = apparier([ligne], [offre_a, offre_b])
+        assert not rapport.appariees
+        assert not rapport.a_importer
+        assert len(rapport.ambigues) == 1
+        ligne_ambigue, candidates = rapport.ambigues[0]
+        assert ligne_ambigue is ligne
+        assert {c.sorare_id for c in candidates} == {"off-a", "off-b"}
+        assert rapport.cycle_suspendu
+
+
+class TestImportOffreManuelle:
+    def test_offre_sorare_sans_ligne_journal_est_a_importer(self):
+        offre = OffreSorareObservee(
+            sorare_id="manuelle-1",
+            vendeur_slug="carol",
+            joueurs_slugs=("haaland",),
+            montant_valeur=800,
+            montant_devise="EUR",
+            creee_le=BASE,
+            etat_brut="OPENED",
+            motif_refus_brut=None,
+            reponse_brute={},
+        )
+        rapport = apparier([], [offre])
+        assert rapport.a_importer == [offre]
+        assert rapport.cycle_suspendu
+
+    def test_journal_vide_et_sorare_vide_ne_suspend_rien(self):
+        rapport = apparier([], [])
+        assert not rapport.cycle_suspendu
+
+
+class TestTraductionMotifsEtEtats:
+    @pytest.mark.parametrize(
+        "brut,attendu",
+        [
+            ("OFFER_TOO_LOW", MotifRefus.OFFRE_TROP_BASSE),
+            ("NOT_SELLING", MotifRefus.NE_VEND_PAS),
+            ("CARD_NOT_WANTED", MotifRefus.CARTE_NON_DESIREE),
+            ("ONLY_CASH", MotifRefus.UNIQUEMENT_CASH),
+            ("ADD_CASH", MotifRefus.AJOUTE_CASH),
+            ("IN_A_LINEUP", MotifRefus.DANS_COMPOSITION),
+        ],
+    )
+    def test_motifs_connus(self, brut, attendu):
+        assert motif_refus_depuis_sorare(brut) == attendu
+
+    def test_motif_absent_devient_sans_motif_pas_une_supposition_silencieuse(self):
+        assert motif_refus_depuis_sorare(None) == MotifRefus.SANS_MOTIF
+
+    def test_motif_inconnu_leve_une_erreur_plutot_que_de_deviner(self):
+        with pytest.raises(ValueError):
+            motif_refus_depuis_sorare("UN_MOTIF_QUI_N_EXISTE_PAS")
+
+    def test_etats_connus(self):
+        assert etat_depuis_sorare("ACCEPTED") == EtatOffre.ACCEPTEE
+        assert etat_depuis_sorare("REJECTED") == EtatOffre.REFUSEE
+        assert etat_depuis_sorare("CANCELLED") == EtatOffre.ANNULEE
+        assert etat_depuis_sorare("OPENED") == EtatOffre.ENVOYEE
+
+
+class TestDepuisReponseSorare:
+    def test_parse_un_noeud_complet(self):
+        noeuds = [
+            {
+                "id": "off-1",
+                "status": "OPENED",
+                "rejectionReason": None,
+                "createdAt": "2026-09-20T12:00:00+00:00",
+                "settlementCurrencies": ["EUR"],
+                "receiver": {"slug": "alice"},
+                "senderSide": {"amounts": {"eurCents": 700, "wei": "0"}},
+                "receiverSide": {
+                    "anyCards": [
+                        {"assetId": "card-1", "anyPlayer": {"slug": "messi"}},
+                    ]
+                },
+            }
+        ]
+        offres = depuis_reponse_sorare(noeuds)
+        assert len(offres) == 1
+        offre = offres[0]
+        assert offre.sorare_id == "off-1"
+        assert offre.vendeur_slug == "alice"
+        assert offre.joueurs_slugs == ("messi",)
+        assert offre.montant_valeur == 700
+        assert offre.montant_devise == "EUR"
+
+    def test_devise_de_reglement_non_geree_est_ignoree(self):
+        noeuds = [
+            {
+                "id": "off-2",
+                "status": "OPENED",
+                "rejectionReason": None,
+                "createdAt": "2026-09-20T12:00:00+00:00",
+                "settlementCurrencies": ["USD"],
+                "receiver": {"slug": "alice"},
+                "senderSide": {"amounts": {"eurCents": 700, "wei": "0"}},
+                "receiverSide": {"anyCards": []},
+            }
+        ]
+        assert depuis_reponse_sorare(noeuds) == []

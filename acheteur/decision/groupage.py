@@ -26,21 +26,26 @@ def grouper_par_vendeur(annonces: list[Annonce]) -> dict[str, list[Annonce]]:
 def montants_offre_groupe(
     annonces: list[Annonce],
     palier: Palier,
-    decote_groupe: bool = False,
 ) -> dict[str, int]:
     """Calcule le montant de l'offre pour chaque annonce du groupe.
+
+    La décote de groupe (65% au lieu de 70%) s'applique au premier palier
+    dès que le groupe compte plus d'une annonce — ce n'est pas un réglage
+    au choix de l'appelant, c'est la même règle que `proposition.proposer_groupe`
+    (DECISIONS.md, lot L3). Les deux fonctions doivent rester en accord :
+    un groupe de deux cartes ou plus se décote, un groupe d'une carte non.
 
     Args:
         annonces: les annonces du groupe (même vendeur)
         palier: niveau d'escalade (70%, 75%, 80%)
-        decote_groupe: si True, applique 65% au lieu de 70% pour le premier palier
 
     Returns:
         dict {joueur_slug: montant_offre}
     """
+    decote = palier == Palier.PREMIER and len(annonces) > 1
     montants = {}
     for annonce in annonces:
-        if decote_groupe and palier == Palier.PREMIER:
+        if decote:
             montants[annonce.joueur.slug] = (annonce.prix_demande.valeur * 65) // 100
         else:
             montants[annonce.joueur.slug] = montant_offre(annonce.prix_demande.valeur, palier)

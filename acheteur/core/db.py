@@ -42,6 +42,17 @@ def obtenir_moteur() -> Engine:
     return _moteur_pour(get_settings().database_url)
 
 
+def creer_tables() -> None:
+    """Crée les tables manquantes. Idempotent — n'efface jamais rien.
+
+    Importe les modules de modèles ici (pas en haut de fichier) : ils
+    importent `Base` depuis ce module, un import en tête créerait un cycle.
+    """
+    from acheteur.negociation import journal  # noqa: F401
+
+    Base.metadata.create_all(obtenir_moteur())
+
+
 def obtenir_fabrique_session() -> sessionmaker[Session]:
     return sessionmaker(bind=obtenir_moteur(), autoflush=False, expire_on_commit=False)
 

@@ -174,7 +174,9 @@ def main() -> int:
                 if autorisations:
                     print(f"  ✓ Autorisations demandées : {autorisations}")
                 else:
-                    status = "pas d'autorisation demandée" if not erreurs else "erreur de validation"
+                    status = (
+                        "pas d'autorisation demandée" if not erreurs else "erreur de validation"
+                    )
                     print(f"  → {status}")
 
             except Exception as exc:

@@ -2,11 +2,14 @@
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from acheteur.decision import (
     Palier,
     est_bonne_affaire,
     grouper_par_vendeur,
     montant_offre,
+    montants_offre_groupe,
     palier_suivant,
     proposer_groupe,
     proposer_simple,
@@ -82,6 +85,33 @@ class TestReferencePrix:
         assert ref is not None
         assert ref.valeur == 1000  # Médiane de [950, 1000, 1100]
 
+    def test_reference_mediane_nombre_pair_de_ventes(self):
+        """4 ventes : pas de valeur centrale unique, moyenne entière des deux du milieu."""
+        joueur = Joueur("messi", "Messi", Rareté("Limited", 2))
+        base = datetime(2026, 9, 20)
+        ventes = [
+            Vente(joueur, Montant(1000, Devise.EUR), base - timedelta(days=6)),
+            Vente(joueur, Montant(1100, Devise.EUR), base - timedelta(days=4)),
+            Vente(joueur, Montant(951, Devise.EUR), base - timedelta(days=2)),
+            Vente(joueur, Montant(1050, Devise.EUR), base - timedelta(days=1)),
+        ]
+        ref = reference_prix_joueur(joueur, ventes, base)
+        assert ref is not None
+        # Triées : [951, 1000, 1050, 1100] -> milieu (1000+1050)//2 = 1025, entier.
+        assert ref.valeur == 1025
+        assert isinstance(ref.valeur, int)
+
+    def test_reference_devises_melangees_leve_une_erreur(self):
+        joueur = Joueur("messi", "Messi", Rareté("Limited", 2))
+        base = datetime(2026, 9, 20)
+        ventes = [
+            Vente(joueur, Montant(1000, Devise.EUR), base - timedelta(days=5)),
+            Vente(joueur, Montant(1, Devise.ETH), base - timedelta(days=3)),
+            Vente(joueur, Montant(950, Devise.EUR), base - timedelta(days=1)),
+        ]
+        with pytest.raises(ValueError):
+            reference_prix_joueur(joueur, ventes, base)
+
 
 class TestSeuil:
     """Seuil : sélection des annonces sous 90% de la référence."""
@@ -97,7 +127,7 @@ class TestSeuil:
             date_pose=datetime.now(),
         )
         # Référence : 1200 EUR. Prix demandé 1000 EUR < 90% * 1200 = 1080.
-        assert est_bonne_affaire(annonce, 1200)
+        assert est_bonne_affaire(annonce, Montant(1200, Devise.EUR))
 
     def test_mauvaise_affaire(self):
         joueur = Joueur("messi", "Messi", Rareté("Limited", 2))
@@ -110,7 +140,21 @@ class TestSeuil:
             date_pose=datetime.now(),
         )
         # Référence : 1200 EUR. Prix demandé 1100 EUR > 90% * 1200 = 1080.
-        assert not est_bonne_affaire(annonce, 1200)
+        assert not est_bonne_affaire(annonce, Montant(1200, Devise.EUR))
+
+    def test_devise_incoherente_leve_une_erreur(self):
+        joueur = Joueur("messi", "Messi", Rareté("Limited", 2))
+        annonce = Annonce(
+            joueur=joueur,
+            vendeur_slug="vendeur_1",
+            prix_demande=Montant(1000, Devise.EUR),
+            accepte_eth=True,
+            accepte_eur=True,
+            date_pose=datetime.now(),
+        )
+        # Référence en ETH, annonce en EUR : comparer les deux serait absurde.
+        with pytest.raises(ValueError):
+            est_bonne_affaire(annonce, Montant(1, Devise.ETH))
 
 
 class TestPaliers:
@@ -147,6 +191,37 @@ class TestGroupage:
         assert len(groupes) == 2
         assert len(groupes["alice"]) == 2
         assert len(groupes["bob"]) == 1
+
+    def test_montants_offre_groupe_decote_si_plus_d_une_annonce(self):
+        """Même règle que proposer_groupe : décote 65% seulement si le groupe a >1 annonce."""
+        messi = Joueur("messi", "Messi", Rareté("Limited", 2))
+        haaland = Joueur("haaland", "Haaland", Rareté("Limited", 2))
+        annonces = [
+            Annonce(messi, "alice", Montant(1000, Devise.EUR), True, True, datetime.now()),
+            Annonce(haaland, "alice", Montant(2000, Devise.EUR), True, True, datetime.now()),
+        ]
+        montants = montants_offre_groupe(annonces, Palier.PREMIER)
+        assert montants["messi"] == 650  # 65% * 1000
+        assert montants["haaland"] == 1300  # 65% * 2000
+
+    def test_montants_offre_groupe_sans_decote_si_une_seule_annonce(self):
+        messi = Joueur("messi", "Messi", Rareté("Limited", 2))
+        annonces = [Annonce(messi, "alice", Montant(1000, Devise.EUR), True, True, datetime.now())]
+        montants = montants_offre_groupe(annonces, Palier.PREMIER)
+        assert montants["messi"] == 700  # 70%, pas de décote sur une annonce seule
+
+    def test_montants_offre_groupe_coherent_avec_proposer_groupe(self):
+        """Les deux fonctions calculent la même décote pour le même groupe."""
+        messi = Joueur("messi", "Messi", Rareté("Limited", 2))
+        haaland = Joueur("haaland", "Haaland", Rareté("Limited", 2))
+        annonces = [
+            Annonce(messi, "alice", Montant(1000, Devise.EUR), True, True, datetime.now()),
+            Annonce(haaland, "alice", Montant(2000, Devise.EUR), True, True, datetime.now()),
+        ]
+        references = {"messi": 1200, "haaland": 2400}
+        via_groupage = montants_offre_groupe(annonces, Palier.PREMIER)
+        via_proposition = proposer_groupe(annonces, references, Palier.PREMIER)
+        assert via_groupage == via_proposition.montants_offre
 
 
 class TestProposition:

@@ -82,3 +82,65 @@ Tous les calculs vivent dans `acheteur/marche/` (population, référence) et
 `acheteur/decision/` (sélection, paliers, groupage, propositions). Zéro appel
 réseau, zéro écriture base : seuls les paramètres changent. 14 cas de test
 couvrent les chemins critiques et les bornes.
+
+## 2026-09-20 — Corrections lot L3 (revue post-implémentation)
+
+Trois défauts trouvés en revue, corrigés, chacun avec un test de non-régression :
+
+**`est_bonne_affaire` comparait une devise à elle-même.** `selecteur.py`
+vérifiait `annonce.prix_demande.devise != annonce.prix_demande.devise` —
+toujours faux, donc aucune vérification réelle. Corrigé : la fonction prend
+maintenant la référence sous forme de `Montant` (pas un `int` nu, qui avait
+fait perdre la devise en route) et compare vraiment les deux devises, avec
+`ValueError` si elles diffèrent. `selectionner_annonces` suit le même
+contrat (`dict[str, Montant]`).
+
+**Décote de groupage à deux règles différentes.** `groupage.montants_offre_groupe`
+prenait un booléen `decote_groupe` laissé au choix de l'appelant ;
+`proposition.proposer_groupe` décidait seule, automatiquement, sur
+`len(annonces) > 1`. Deux fonctions pour le même calcul, deux résultats
+possibles pour le même groupe selon celle qu'on appelle. Corrigé : la règle
+du 2026-09-20 (« décote seulement si plus d'une annonce, au premier palier »)
+est maintenant la seule, appliquée par les deux fonctions de la même façon ;
+`montants_offre_groupe` a perdu son paramètre `decote_groupe`.
+
+**Médiane sur nombre pair de ventes reposait sur un flottant implicite.**
+`statistics.median` renvoie la moyenne des deux valeurs centrales (un
+flottant) quand l'effectif est pair ; `reference_prix.py` la tronquait avec
+`int(...)`. Remplacé par une division entière explicite sur les valeurs
+triées — aucun flottant ne touche plus le calcul, conforme à CLAUDE.md.
+
+## 2026-09-20 — Lot L2 : journal + réconciliation en lecture seule
+
+**Une ligne de journal = une carte, pas un lot groupé.**
+PLAN.md ne tranche pas la granularité de la ligne. Le groupage (lot L3,
+calcul pur) n'a encore aucun chemin d'envoi (lots L5+/L8) : modéliser une
+ligne comme un lot de plusieurs cartes maintenant serait de la spéculation
+sur une forme qui n'existe pas encore. Choix : une ligne par carte. À
+revoir explicitement au lot L8 quand l'envoi groupé sera écrit — pas avant.
+
+**Contraintes de décision (palier ≤ 80%, référence ≥ 3 ventes) suspendues
+pour une ligne importée.** Une offre trouvée sur Sorare sans contrepartie
+dans le journal (faite à la main depuis l'appli web, PLAN.md § « Le
+journal des offres ») n'est passée par aucune décision du bot : lui imposer
+un palier ou une référence inventerait une donnée. Choix : ces colonnes
+sont nullables, les CHECK correspondants ne portent que sur
+`import_automatique = 0`. La ligne importée porte quand même l'identifiant
+Sorare, le montant réellement observé et son état — ce qu'on sait vraiment.
+
+**Créneau horaire de l'appariement par signature : 15 minutes, autour de
+l'horodatage d'écriture de notre ligne (`cree_le`), pas de la date de pose
+de l'annonce du vendeur.** PLAN.md mentionne « même créneau horaire » sans
+donner de valeur ni préciser quel horodatage. Le bon repère est le moment
+où *notre* offre a été écrite (proche du moment où Sorare l'a créée), pas
+la date de mise en vente par le vendeur, qui peut être bien antérieure. La
+tolérance (15 min) est un réglage à affiner si des cas réels la débordent.
+
+**Requête `offres_envoyees` (`sorare/requetes.py`) non vérifiée contre
+l'API réelle.** Portée directement du SDL local
+(`UserOffersInterface.tokenOffers`, `TokenOffer`, `TokenOfferSide`), comme
+`renouvellement.py` l'avait été au lot L0 : plausible sur la forme du
+schéma, jamais encore exécutée contre le compte réel. À vérifier au premier
+`python -m acheteur.cli.reconcilier` réel (voir MESURES.md) — en particulier
+le mapping `senderSide`/`receiverSide` (montant payé vs. cartes reçues) et
+la sémantique de `receiver` comme vendeur.

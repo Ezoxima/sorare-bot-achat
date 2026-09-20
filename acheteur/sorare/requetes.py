@@ -63,3 +63,73 @@ def etat_compte(client: SorareClient) -> dict[str, Any]:
     """Interroge l'état du compte courant. Nécessite un JWT valide."""
     data = client.execute(ETAT_COMPTE_QUERY)
     return data["currentUser"]
+
+
+# NON VÉRIFIÉE contre l'API réelle (voir MESURES.md : ce fichier ne
+# consigne que ce qui est prouvé par une sonde). Portée directement du SDL
+# local (`schema/sorare_schema.graphql` : `UserOffersInterface.tokenOffers`,
+# `TokenOffer`, `TokenOfferSide`) — à confirmer au premier `reconcilier`
+# réel, comme `renouvellement.py` l'a été (DECISIONS.md, lot L0).
+#
+# Une seule page (`first`) : la pagination complète n'est pas nécessaire au
+# lot L2, qui ne regarde que les offres ouvertes récentes. À revoir si le
+# nombre d'offres ouvertes dépasse durablement `first`.
+OFFRES_ENVOYEES_QUERY = """
+query OffresEnvoyees($first: Int!) {
+  currentUser {
+    tokenOffers(direction: SENT, first: $first, sortType: DESC) {
+      nodes {
+        id
+        status
+        rejectionReason
+        createdAt
+        settlementCurrencies
+        receiver {
+          slug
+        }
+        senderSide {
+          amounts {
+            eurCents
+            wei
+          }
+        }
+        receiverSide {
+          anyCards {
+            assetId
+            anyPlayer {
+              slug
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def offres_envoyees(client: SorareClient, premieres: int = 100) -> list[dict[str, Any]]:
+    """Les offres directes envoyées par l'utilisateur courant, non paginé.
+
+    Renvoie les nœuds bruts (pas de traduction ici — `sorare.requetes` ne
+    fait que lire) ; `negociation.reconciliation` les met en forme.
+    """
+    data = client.execute(OFFRES_ENVOYEES_QUERY, variables={"first": premieres})
+    return data["currentUser"]["tokenOffers"]["nodes"]
+
+
+def annonces_marche(client: SorareClient) -> list[dict[str, Any]]:
+    """Les annonces actuelles du marché (offres ouvertes pour achat).
+
+    À L4 (lot courant), c'est un placeholder : le scanner teste la chaîne
+    de décision sur des données mockées, pas sur le marché réel.
+    À L6+, remplacer par une vraie requête GraphQL selon le schéma Sorare.
+
+    Returns:
+        liste des annonces brutes du marché
+    """
+    # TODO(L6) : implémenter la vraie requête GraphQL selon le schéma Sorare
+    # Pour l'instant, lever une exception pour rappeler que c'est à faire
+    raise NotImplementedError(
+        "annonces_marche() est un placeholder L4. À implémenter L6 selon le schéma Sorare."
+    )

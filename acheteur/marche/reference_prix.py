@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from statistics import median
 
 from acheteur.marche.types import Joueur, Montant, Vente
 
@@ -43,8 +42,15 @@ def reference_prix_joueur(
         raise ValueError(f"Ventes en devises mélangées pour {joueur.slug}")
 
     devise = devises.pop()
-    prix_en_valeur = [v.prix.valeur for v in ventes_recentes]
-    mediane = int(median(prix_en_valeur))
+    valeurs_triees = sorted(v.prix.valeur for v in ventes_recentes)
+    milieu = len(valeurs_triees) // 2
+    if len(valeurs_triees) % 2 == 1:
+        mediane = valeurs_triees[milieu]
+    else:
+        # Nombre pair de ventes : aucune des deux valeurs centrales n'est
+        # LA médiane. Division entière (arrondi vers le bas), jamais de
+        # flottant sur un montant.
+        mediane = (valeurs_triees[milieu - 1] + valeurs_triees[milieu]) // 2
 
     return Montant(mediane, devise)
 
