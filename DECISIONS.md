@@ -144,3 +144,62 @@ schéma, jamais encore exécutée contre le compte réel. À vérifier au premie
 `python -m acheteur.cli.reconcilier` réel (voir MESURES.md) — en particulier
 le mapping `senderSide`/`receiverSide` (montant payé vs. cartes reçues) et
 la sémantique de `receiver` comme vendeur.
+
+## 2026-09-20 — Lot L4 : Garde-fous + Barrière + Simulation + Scan
+
+**Barrière : une seule fonction, deux modes (simulation ET réel).**
+`barriere.envoyer_offre_proposal()` gère les deux modes via param
+`mode_simulation`. Avantage : un seul chemin de code à protéger (plus simple),
+la preuve mécanique du test unique_path.py tient sur tous les cas. Les 9
+garde-fous s'appliquent aux deux modes de la même façon — seule la dernière
+étape (appel Sorare) diffère.
+
+**Contexte barrière** : plutôt qu'une forêt de paramètres à envoyer_offre_proposal(),
+les garde-fous reçoivent un `ContexteBarriere` (dataclass) qui regroupe soldes,
+offres ouvertes, taux de change, timestamps. Plus lisible, plus testable.
+
+**Simulation mode : mode_simulation=True par défaut dans le scanner CLI.**
+Le scanner (acheteur.cli.scanner) appelle envoyer_offre_proposal() avec
+mode_simulation=True, écrit les lignes dans le journal avec etat=SIMULEE.
+Aucun appel Sorare n'est fait. C'est la couche test du lot L4, utilisable
+seul pour développement.
+
+**Approbation phase 1 : tableau + retapez montant total.**
+Pas de validation ligne-par-ligne interactif (trop lent pour 20+ propositions).
+Format email-like (tableau markdown), puis re-entry du montant total —
+« protocole d'un virement bancaire » (PLAN.md) qui empêche les clics
+machinaux. La structure support du CLI est prête pour phase 2 (automatique,
+L11) : juste changer l'appelant en un approuveur auto qui vérifie le taux
+d'acceptation.
+
+**Test unique_path.py : preuve AST qu'il n'existe qu'un seul appelant
+enregistrer_ligne().**
+Garantie structurelle, pas une promesse. Parcourt le source, trouve tout appel
+à enregistrer_ligne(), vérifie qu'il n'existe qu'un fichier : barriere.py.
+Aucune autre fonction, aucun autre module ne peut écrire le journal en envoyant.
+Impossible de contourner les garde-fous.
+
+**Requête annonces_marche() : placeholder pour L6.**
+Sorare.requetes.annonces_marche() lève NotImplementedError pour l'instant.
+À implémenter au lot L6 selon le schéma GraphQL Sorare réel. Pour L4
+(simulation), le scanner teste la chaîne sur données mockées, pas sur marché.
+
+**Module simulation.py** : permet de simuler acceptation/refus des offres
+à titre de test, mise à jour des états (ACCEPTEE, REFUSEE + motif) sans
+toucher Sorare. Base pour les tests intégration L4.
+
+## 2026-09-20 — Contraintes L4 vérifiées
+
+Les neuf garde-fous PLAN.md sont tous implémentés :
+1. Somme offres ≤ solde disponible
+2. Solde relu < 30 sec avant envoi
+3. Ne jamais offrir > prix demandé
+4. Cohérence ETH (wei) vs EUR (centimes), détecte 10^18 facteur
+5. Taux change < 15 min, sinon refuse conversion
+6. Palier ≤ 80% (appliqué en code ET base CHECK)
+7. Offres par vendeur limitées à 5 (plafond injectable)
+8. Arrêt d'urgence (.arret-urgence à racine bloque tout)
+9. Mode réel : env var AND CLI flag AND retape montant (trois verrous)
+
+Mode simulation par défaut, retour sim à chaque redémarrage.
+Pas un seul paramètre dans config ne déverrouille mode réel seul.
