@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+sondes/resultats/*
+!sondes/resultats/.gitkeep
+schema/
+ARRET_URGENCE
+.pytest_cache/
+*.egg-info/
+.ruff_cache/
