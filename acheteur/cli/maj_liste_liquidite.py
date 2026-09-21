@@ -142,8 +142,9 @@ def main() -> int:
     info = renouveler_si_necessaire(info, horloge)
 
     with session_scope() as session, SorareClient(jwt=info.token, jwt_aud=info.aud) as client:
-        print(f"Récupération de {args.premieres} annonces du marché...")
-        noeuds_marche = requetes.annonces_marche(client, premieres=args.premieres)
+        print(f"Récupération de {args.premieres} annonces du marché (par pages de "
+              f"{requetes.TAILLE_PAGE_ANNONCES_MARCHE})...")
+        noeuds_marche = requetes.annonces_marche_paginees(client, maximum=args.premieres)
         annonces = annonces_depuis_noeuds_marche(noeuds_marche)
         print(f"  {len(annonces)} annonces traduites (sur {len(noeuds_marche)} nœuds bruts)")
 

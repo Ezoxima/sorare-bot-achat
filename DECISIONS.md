@@ -1195,3 +1195,46 @@ liste (le cœur de L9), la déduplication d'`annonces_marche` reste bornée
 par la limite de pagination déjà connue (~50 nœuds réels, voir MESURES.md
 2026-09-21) — `cli/maj_liste_liquidite.py` en hérite tel quel pour
 l'instant.
+
+## 2026-09-22 — Dette technique résorbée : pagination du marché, taille de lot confirmée, correction stock_vendeur/vitrine_vendeur
+
+Trois points de dette technique identifiés en clôturant la session
+précédente, traités et mesurés contre l'API réelle avant tout autre
+développement.
+
+**1. Pagination de `liveSingleSaleOffers`** — `annonces_marche` restait
+plafonnée à ~50 nœuds réels quel que soit `--premieres` (une seule page).
+Ajout de `annonces_marche_paginees` (`sorare/requetes.py`) : avance par
+curseur (`after`/`pageInfo.endCursor`) jusqu'à un maximum choisi, vérifié
+en réel (0 chevauchement entre pages, `totalCount` mesuré à 543 496 — voir
+MESURES.md). Branché dans `cli/maj_liste_liquidite.py`, qui en avait le
+plus besoin (couverture de la liste liquide). Testé en réel à
+`--premieres 500` : 8 couples liquides retenus contre 2 sur un échantillon
+de 100 précédemment. `cli/scan_marche.py` et `cli/scan_liste_liquidite.py`
+gardent volontairement `annonces_marche` en une seule page — le premier est
+un outil d'aperçu/validation (`--premieres` déjà un réglage explicite), le
+second cible un joueur précis (`playerSlug`) où une seule page suffit
+largement.
+
+**2. `TAILLE_LOT_HISTORIQUE_PRIX_DEFAUT = 200` confirmé contre l'API réelle**
+— testé jusqu'à 360 alias (succès) et 380/400 (échec, `HTTP 413 Payload Too
+Large`). Découverte importante : ce n'est pas un plafond de complexité
+GraphQL comme supposé par analogie avec les `.gs`, mais une limite de
+taille de payload HTTP — donc sensible à la longueur du texte de la
+requête, pas au coût du champ interrogé. 200 reste le défaut, avec une
+marge confortable (~45%) avant la limite mesurée.
+
+**3. Bug réel trouvé et corrigé : `stock_vendeur`/`vitrine_vendeur`
+plantaient sur un vendeur inconnu** au lieu de rendre `None`. L'hypothèse
+initiale (un slug inconnu rend `user: null` silencieusement, par analogie
+avec d'autres champs Sorare) était fausse : l'API lève une erreur GraphQL
+(`NOT_FOUND`), que `sorare/client.py` traduit en `SorareError` — jamais
+interceptée avant ce correctif, ce qui aurait fait planter tout un run de
+`scan_marche.py`/`scan_liste_liquidite.py` sur un vendeur parti ou renommé
+entre la lecture d'une annonce et la vérification de son stock. Les deux
+fonctions capturent maintenant explicitement `SorareError` et rendent
+`None` (« non mesurable »), cohérent avec la prudence déjà appliquée pour
+un stock trop gros ou absent (`_filtrer_par_stock_vendeur`).
+
+Les trois points sont mesurés et consignés dans MESURES.md (pas seulement
+supposés). 268 tests passent après ces correctifs.

@@ -465,6 +465,58 @@ un vrai paiement Sorare**, pas seulement contre des vecteurs de test
 publics. Les deux rails de paiement (ETH et EUR) sont maintenant
 fonctionnels de bout en bout.
 
+## 2026-09-22 — `liveSingleSaleOffers` : la pagination par curseur avance réellement
+
+Contrairement au plafond de `first` sur une seule page (~50 nœuds réels
+quel que soit ce qu'on demande, voir l'entrée du 2026-09-21), la pagination
+par curseur (`after`/`pageInfo.endCursor`) fonctionne : deux pages
+consécutives (50 nœuds chacune) ont **0 identifiant en commun**, et
+`totalCount` mesuré à **543 496** — très largement au-delà de ce qu'un seul
+`--premieres` élevé laissait espérer. `annonces_marche_paginees` (nouveau,
+`sorare/requetes.py`) boucle sur ce curseur jusqu'à un maximum choisi par
+l'appelant ou l'épuisement du flux (fenêtre de 8 jours glissants, documentée
+dans le SDL).
+
+Vérifié en conditions réelles sur `cli/maj_liste_liquidite.py --premieres 500` :
+10 pages, 500 nœuds bruts → 290 annonces traduites → 280 couples distincts
+→ 8 couples liquides retenus (contre 2 sur un échantillon de 100 la fois
+précédente), le tout en ~7,9 s.
+
+## 2026-09-22 — Taille de lot de `historique_prix_joueurs_lot` : limite réelle mesurée entre 360 et 380 alias
+
+Testé avec des slugs réels (répétés pour atteindre la taille voulue — un
+alias GraphQL accepte les mêmes arguments plusieurs fois sans problème) :
+200, 250, 300, 320, 340, 350, 360 alias passent (200 alias en 1,1 s) ; 380
+et 400 échouent avec `HTTP 413 Payload Too Large`.
+
+**Ce n'est pas un plafond de complexité GraphQL** (contrairement à
+l'hypothèse initiale par analogie avec `CRITERES_BA.aliasVentes` des
+`sealing-sorare-apps-script`, mesuré là-bas à 121 de complexité/alias sous
+30 000) : c'est une limite de **taille de payload HTTP**, qui dépend donc
+de la longueur du texte de la requête (nombre d'alias × longueur des
+déclarations de variables), pas d'un coût par champ interrogé.
+`TAILLE_LOT_HISTORIQUE_PRIX_DEFAUT = 200` est conservé (confirmé, marge
+confortable d'environ 45 % avant la limite mesurée).
+
+## 2026-09-22 — `stock_vendeur`/`vitrine_vendeur` : un vendeur inconnu lève une erreur GraphQL, pas un `user: null` silencieux
+
+Hypothèse initiale (par analogie avec d'autres champs Sorare, et avec la
+distinction documentée côté `.gs` entre `players(slugs:)` silencieux et
+`tokenPrices` qui casse tout l'appel groupé) : un slug de vendeur inconnu
+rendrait `user: null` sans erreur. **Faux, vérifié en réel** : interroger
+`user(slug: "ce-slug-nexiste-pas")` lève une erreur GraphQL
+(`extensions.code: NOT_FOUND`, message `User(slug=...) not found`), donc
+une `SorareError` côté `sorare/client.py`. Les deux fonctions
+(`stock_vendeur`, `vitrine_vendeur`) capturent maintenant cette exception
+et rendent `None` — sans ce correctif, un vendeur devenu introuvable entre
+la lecture d'une annonce et la vérification de son stock aurait fait
+planter tout le run de `scan_marche.py`/`scan_liste_liquidite.py`.
+
+Vérifié aussi contre un vrai vendeur (`satonio`, 16 198 annonces en cours)
+: `stock_vendeur`/`vitrine_vendeur` renvoient bien la forme attendue
+(`nickname`, `totalCount`, nœuds au format `TokenOffer` identique à
+`ANNONCES_MARCHE_QUERY`).
+
 ## Prochaines mesures attendues, dans l'ordre
 
 1. **Etat du compte (référence du 2026-09-20)** →

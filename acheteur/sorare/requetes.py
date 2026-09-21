@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from acheteur.sorare.client import SorareClient
+from acheteur.sorare.client import SorareClient, SorareError
 
 ETAT_COMPTE_QUERY = """
 query EtatCompte {
@@ -158,9 +158,13 @@ def offres_envoyees(client: SorareClient, premieres: int = 100) -> list[dict[str
 # lit les deux côtés et prend celui qui porte des cartes / celui qui porte
 # un montant, plutôt que de figer une hypothèse fausse en dur.
 ANNONCES_MARCHE_QUERY = """
-query AnnoncesMarche($first: Int!, $playerSlug: String) {
+query AnnoncesMarche($first: Int!, $playerSlug: String, $after: String) {
   tokens {
-    liveSingleSaleOffers(first: $first, playerSlug: $playerSlug) {
+    liveSingleSaleOffers(first: $first, playerSlug: $playerSlug, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
       nodes {
         id
         status
@@ -209,7 +213,15 @@ query AnnoncesMarche($first: Int!, $playerSlug: String) {
 def annonces_marche(
     client: SorareClient, premieres: int = 100, joueur_slug: str | None = None
 ) -> list[dict[str, Any]]:
-    """Les annonces actuelles du marché à prix fixe (`liveSingleSaleOffers`).
+    """Les annonces actuelles du marché à prix fixe (`liveSingleSaleOffers`),
+    UNE SEULE page.
+
+    ⚠️ **Plafonné à ~50 nœuds réels quel que soit `premieres`** (constaté
+    2026-09-21, voir MESURES.md) : ne pas augmenter `premieres` en espérant
+    une couverture plus large sans utiliser `annonces_marche_paginees` à la
+    place (2026-09-22 : la pagination par curseur, elle, avance bien —
+    vérifié contre l'API réelle, 0 chevauchement entre deux pages
+    consécutives, `totalCount` mesuré à plus de 500 000).
 
     Ne fait que lire et aplatir la réponse brute — la traduction vers le
     type `Annonce` du domaine vit dans `acheteur.marche.traduction`
@@ -217,7 +229,7 @@ def annonces_marche(
 
     Args:
         client: client GraphQL Sorare
-        premieres: nombre maximum d'annonces à récupérer (non paginé)
+        premieres: nombre maximum d'annonces à récupérer sur cette page
         joueur_slug: filtre optionnel sur un seul joueur
 
     Returns:
@@ -225,9 +237,63 @@ def annonces_marche(
     """
     data = client.execute(
         ANNONCES_MARCHE_QUERY,
-        variables={"first": premieres, "playerSlug": joueur_slug},
+        variables={"first": premieres, "playerSlug": joueur_slug, "after": None},
     )
     return data["tokens"]["liveSingleSaleOffers"]["nodes"]
+
+
+# Taille de page réelle de `liveSingleSaleOffers` : ~50 nœuds quel que soit
+# `first` demandé au-delà (constaté 2026-09-21, MESURES.md).
+TAILLE_PAGE_ANNONCES_MARCHE = 50
+
+
+def annonces_marche_paginees(
+    client: SorareClient,
+    maximum: int,
+    joueur_slug: str | None = None,
+    taille_page: int = TAILLE_PAGE_ANNONCES_MARCHE,
+) -> list[dict[str, Any]]:
+    """Comme `annonces_marche`, mais avance par curseur (`after`) jusqu'à
+    `maximum` nœuds ou épuisement du flux (fenêtre de 8 jours glissants,
+    voir le SDL : « sorted by updated time (from 8 days ago) »).
+
+    Vérifié contre l'API réelle (2026-09-22, MESURES.md) : deux pages
+    consécutives ne se chevauchent pas (0 identifiant en commun), et
+    `totalCount` dépasse largement `maximum` en pratique — la pagination
+    avance donc réellement, contrairement au plafond de `first` sur une
+    seule page.
+
+    Args:
+        client: client GraphQL Sorare
+        maximum: nombre maximum de nœuds à accumuler avant de s'arrêter
+        joueur_slug: filtre optionnel sur un seul joueur
+        taille_page: nœuds demandés par page (voir `TAILLE_PAGE_ANNONCES_MARCHE`)
+
+    Returns:
+        liste des annonces brutes (`TokenOffer` nodes), au plus `maximum`.
+    """
+    tous: list[dict[str, Any]] = []
+    curseur: str | None = None
+
+    while len(tous) < maximum:
+        restant = maximum - len(tous)
+        data = client.execute(
+            ANNONCES_MARCHE_QUERY,
+            variables={
+                "first": min(taille_page, restant),
+                "playerSlug": joueur_slug,
+                "after": curseur,
+            },
+        )
+        bloc = data["tokens"]["liveSingleSaleOffers"]
+        tous.extend(bloc["nodes"])
+
+        page_info = bloc.get("pageInfo") or {}
+        if not page_info.get("hasNextPage") or not page_info.get("endCursor"):
+            break
+        curseur = page_info["endCursor"]
+
+    return tous
 
 
 # NON VÉRIFIÉE contre l'API réelle. Portée du SDL local
@@ -294,16 +360,18 @@ def historique_prix_joueur(
     return data["tokens"]["tokenPrices"]
 
 
-# Taille de lot par défaut pour `historique_prix_joueurs_lot` — inspirée de
-# `CRITERES_BA.aliasVentes = 200` (sealing-sorare-apps-script/04 - bonnes
-# affaires liste.gs), mesuré là-bas à 121 de complexité par alias pour un
-# jeu de champs plus large (eurCents/usdCents/gbpCents/wei/date/deal) sous
-# un plafond de complexité de 30 000. Notre jeu de champs est un
-# sous-ensemble strict (eurCents/wei/date seulement) : la complexité par
-# alias devrait être inférieure, donc 200 devrait tenir confortablement —
-# mais ⚠️ **NON VÉRIFIÉ contre l'API réelle avec CE jeu de champs**. À
-# confirmer (et consigner dans MESURES.md) au premier run réel avant de
-# monter ce chiffre plus haut.
+# Taille de lot par défaut pour `historique_prix_joueurs_lot`.
+#
+# VÉRIFIÉ contre l'API réelle (2026-09-22, voir MESURES.md) : 200 alias
+# passe confortablement (1,1 s), le lot tient jusqu'à 360 avant échec.
+# ⚠️ Ce n'est PAS le plafond de complexité GraphQL attendu par analogie avec
+# `CRITERES_BA.aliasVentes = 200` des `.gs` (mesuré là-bas à 121/alias sous
+# 30 000 de complexité) : la vraie limite observée ici est une taille de
+# PAYLOAD HTTP (`413 Payload Too Large` à 400 alias, pas une erreur de
+# complexité GraphQL) — donc dépend de la taille du texte de la requête
+# (nombre d'alias × longueur des déclarations), pas d'un coût par champ.
+# 200 garde une marge confortable (~45 % de la limite mesurée) sans la
+# rapprocher au point qu'une variation de longueur de slugs la fasse basculer.
 TAILLE_LOT_HISTORIQUE_PRIX_DEFAUT = 200
 
 
@@ -366,9 +434,9 @@ def historique_prix_joueurs_lot(
     return [racine.get(f"a{i}") or [] for i in range(len(demandes))]
 
 
-# NON VÉRIFIÉE contre l'API réelle. Portée du SDL local (`User.
-# liveSingleSaleTokenOffers` — schema/sorare_schema.graphql:31036) : le
-# nombre d'annonces en cours d'un vendeur, utilisé comme indice de
+# VÉRIFIÉE contre l'API réelle (2026-09-22, voir MESURES.md). Portée du SDL
+# local (`User.liveSingleSaleTokenOffers` — schema/sorare_schema.graphql:31036) :
+# le nombre d'annonces en cours d'un vendeur, utilisé comme indice de
 # « joignabilité » avant d'exploiter le signal `SOUS_VENTE_MINI`
 # (`decision.selecteur.est_sous_vente_minimum`) — voir DECISIONS.md
 # (2026-09-22, inspiré de `SOUS_VENTE_MINI.stockMaxVendeur` dans
@@ -389,17 +457,27 @@ query StockVendeur($slug: String!) {
 def stock_vendeur(client: SorareClient, slug_vendeur: str) -> dict[str, Any] | None:
     """La taille de la vitrine d'un vendeur (nombre d'annonces en cours).
 
-    Renvoie `None` si le slug est inconnu de l'API (`user: null`, ce qui
-    arrive silencieusement côté Sorare) — l'appelant doit alors traiter ce
-    vendeur comme non mesurable, pas comme « petit vendeur » par défaut
-    (même prudence que `filtrerPetitsVendeurs_` dans les `.gs`).
+    Renvoie `None` si le slug est inconnu de l'API — l'appelant doit alors
+    traiter ce vendeur comme non mesurable, pas comme « petit vendeur » par
+    défaut (même prudence que `filtrerPetitsVendeurs_` dans les `.gs`).
+
+    ⚠️ **VÉRIFIÉ contre l'API réelle (2026-09-22, voir MESURES.md)** : un
+    slug inconnu ne rend PAS `user: null` silencieusement (hypothèse initiale,
+    par analogie avec d'autres champs Sorare) — l'API lève une erreur
+    GraphQL (`NOT_FOUND`), donc une `SorareError` ici. Capturée et traitée
+    comme « non mesurable », pas propagée : un vendeur introuvable (parti,
+    renommé entre la lecture de l'annonce et cette vérification) ne doit pas
+    faire planter tout le run.
     """
-    data = client.execute(STOCK_VENDEUR_QUERY, variables={"slug": slug_vendeur})
+    try:
+        data = client.execute(STOCK_VENDEUR_QUERY, variables={"slug": slug_vendeur})
+    except SorareError:
+        return None
     return data.get("user")
 
 
-# NON VÉRIFIÉE contre l'API réelle. Même champ que `STOCK_VENDEUR_QUERY`,
-# avec les nœuds cette fois : sert à l'offre groupée réactive (dès qu'un
+# VÉRIFIÉE contre l'API réelle (2026-09-22, voir MESURES.md). Même champ que
+# `STOCK_VENDEUR_QUERY`, avec les nœuds cette fois : sert à l'offre groupée réactive (dès qu'un
 # petit vendeur produit une candidate, on relit toute sa vitrine pour voir
 # si d'autres de ses cartes correspondent aussi à nos critères — voir
 # DECISIONS.md 2026-09-22, `cli/scan_marche.py`). Même forme de nœud que
@@ -461,13 +539,18 @@ def vitrine_vendeur(
             n'est de toute façon pas le « petit vendeur » ciblé par ce signal.
 
     Returns:
-        `None` si le slug est inconnu de l'API ; sinon
-        `{"nickname": str, "total_count": int, "nodes": [...]}` — les nœuds
-        bruts, prêts pour `traduction.annonces_depuis_noeuds_marche`.
+        `None` si le slug est inconnu de l'API (voir `stock_vendeur` : une
+        `SorareError`, pas un `user: null` silencieux — vérifié contre l'API
+        réelle 2026-09-22, MESURES.md) ; sinon `{"nickname": str,
+        "total_count": int, "nodes": [...]}` — les nœuds bruts, prêts pour
+        `traduction.annonces_depuis_noeuds_marche`.
     """
-    data = client.execute(
-        VITRINE_VENDEUR_QUERY, variables={"slug": slug_vendeur, "first": premieres}
-    )
+    try:
+        data = client.execute(
+            VITRINE_VENDEUR_QUERY, variables={"slug": slug_vendeur, "first": premieres}
+        )
+    except SorareError:
+        return None
     utilisateur = data.get("user")
     if utilisateur is None:
         return None

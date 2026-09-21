@@ -5,9 +5,12 @@ requête et le remappage des résultats, avec un faux client."""
 
 from __future__ import annotations
 
+from acheteur.sorare.client import SorareError
 from acheteur.sorare.requetes import (
     _requete_historique_prix_lot,
     historique_prix_joueurs_lot,
+    stock_vendeur,
+    vitrine_vendeur,
 )
 
 
@@ -70,3 +73,25 @@ class TestHistoriquePrixJoueursLot:
         client = _ClientFactice({"tokens": {"a0": None}})
         demandes = [{"joueur_slug": "messi", "rarete": "limited", "season_eligibility": None}]
         assert historique_prix_joueurs_lot(client, demandes) == [[]]
+
+
+class _ClientQuiEchoue:
+    """Simule le comportement réel découvert le 2026-09-22 (MESURES.md) :
+    un vendeur inconnu ne rend pas `user: null` silencieusement, l'API
+    lève une erreur GraphQL — `client.execute` la traduit en `SorareError`
+    (voir `sorare/client.py`)."""
+
+    def execute(self, query: str, variables: dict | None = None) -> dict:
+        raise SorareError("Erreurs GraphQL : [{'message': 'User(...) not found'}]")
+
+
+class TestStockVendeurEtVitrineVendeurSurVendeurInconnu:
+    """Vérifié réel 2026-09-22 (MESURES.md) : un slug inconnu lève une
+    SorareError, pas un `user: null` silencieux comme supposé initialement.
+    Les deux fonctions doivent la capturer, pas la laisser remonter."""
+
+    def test_stock_vendeur_rend_none_sans_lever(self):
+        assert stock_vendeur(_ClientQuiEchoue(), "vendeur-inconnu") is None
+
+    def test_vitrine_vendeur_rend_none_sans_lever(self):
+        assert vitrine_vendeur(_ClientQuiEchoue(), "vendeur-inconnu") is None
