@@ -105,9 +105,11 @@ def main() -> int:
         # === 5. CHAÎNE DE DÉCISION (L3) ===
         print("Application de la chaîne de décision...")
 
-        # Convertir références en Montant
-        # Note: references est dict {slug: Montant}, pas (valeur, devise)
+        # references est dict {slug: Montant} ; selectionner_annonces veut des
+        # Montant, proposer_groupe veut des valeurs entières nues (même
+        # contrat que proposer_simple, qui fait déjà `.valeur` plus bas).
         references_montant = references
+        references_valeurs = {slug: montant.valeur for slug, montant in references.items()}
 
         # Sélection
         selectionnees = selectionner_annonces(
@@ -134,7 +136,7 @@ def main() -> int:
                     if prop.montant_offre > 0:
                         propositions.append(prop)
                 else:
-                    prop = proposer_groupe(annonces_vendeur, references_montant, palier)
+                    prop = proposer_groupe(annonces_vendeur, references_valeurs, palier)
                     if prop.montant_total > 0:
                         propositions.append(prop)
 

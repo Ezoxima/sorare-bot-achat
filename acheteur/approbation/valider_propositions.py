@@ -7,6 +7,35 @@ d'un virement bancaire pour empêcher les clics machinaux.
 from __future__ import annotations
 
 
+def _parser_euros_en_centimes(saisie: str) -> int:
+    """Parse une saisie EUR ("123", "123.45", "123,45") en centimes, en entier.
+
+    Jamais de `float` sur un montant qui touche un rail de paiement
+    (CLAUDE.md) : la conversion se fait par arithmétique entière sur les
+    chaînes de caractères, pas par multiplication flottante.
+
+    Raises:
+        ValueError: saisie vide, non numérique, ou plus de 2 décimales
+            (une précision que l'EUR ne représente pas — mieux vaut refuser
+            que d'arrondir silencieusement).
+    """
+    partie_entiere, separateur, partie_decimale = saisie.replace(",", ".").partition(".")
+
+    if not partie_entiere.lstrip("-").isdigit():
+        raise ValueError(f"Partie entière invalide : {partie_entiere!r}")
+
+    if separateur:
+        if not partie_decimale.isdigit() or len(partie_decimale) > 2:
+            raise ValueError(f"Partie décimale invalide : {partie_decimale!r}")
+        partie_decimale = partie_decimale.ljust(2, "0")
+    else:
+        partie_decimale = "00"
+
+    signe = -1 if partie_entiere.startswith("-") else 1
+    centimes_entiers = int(partie_entiere.lstrip("-")) * 100 + int(partie_decimale)
+    return signe * centimes_entiers
+
+
 def confirmer_montant_total(
     montant_total: int,
     montant_retape: int,
@@ -64,7 +93,7 @@ def demander_confirmation_utilisateur(
             retape_str = input(prompt).strip()
             # Parser le montant (accepte "123.45" ou "123.45€")
             retape_str = retape_str.replace("€", "").strip()
-            montant_retape = int(float(retape_str) * 100)
+            montant_retape = _parser_euros_en_centimes(retape_str)
             return montant_retape
         except (ValueError, KeyboardInterrupt):
             return None

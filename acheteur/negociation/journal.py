@@ -257,11 +257,17 @@ def importer_ligne_manuelle(
     return ligne
 
 
-def lignes_ouvertes(session: Session) -> list[OffreJournal]:
-    """Les lignes qui occupent encore un couple (joueur, vendeur)."""
-    return list(
-        session.query(OffreJournal)
-        .filter(OffreJournal.etat.in_(ETATS_OUVERTS))
-        .order_by(OffreJournal.id)
-        .all()
-    )
+def lignes_ouvertes(
+    session: Session, *, mode_simulation: bool | None = None
+) -> list[OffreJournal]:
+    """Les lignes qui occupent encore un couple (joueur, vendeur).
+
+    Args:
+        mode_simulation: si fourni, ne renvoie que les lignes simulées
+            (True) ou réellement envoyées (False). Par défaut (None), les
+            deux — c'est ce dont la réconciliation a besoin.
+    """
+    requete = session.query(OffreJournal).filter(OffreJournal.etat.in_(ETATS_OUVERTS))
+    if mode_simulation is not None:
+        requete = requete.filter(OffreJournal.mode_simulation == mode_simulation)
+    return list(requete.order_by(OffreJournal.id).all())
