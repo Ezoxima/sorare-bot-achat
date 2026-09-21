@@ -170,16 +170,26 @@ def motif_refus_depuis_sorare(motif_brut: str | None) -> MotifRefus:
 
 
 def etat_depuis_sorare(etat_brut: str) -> EtatOffre:
-    """Traduit l'état brut Sorare (`OfferState`) en `EtatOffre` du journal.
+    """Traduit l'état brut Sorare (`TokenOffer.status`, un `String!` — pas un
+    enum GraphQL) en `EtatOffre` du journal.
+
+    Comparaison insensible à la casse : DECISIONS.md/MESURES.md supposait des
+    valeurs en capitales (convention des enums Sorare habituels) ; le premier
+    run réel (lot L6, 2026-09-21) a montré que ce champ-ci renvoie des
+    valeurs en minuscules (`"rejected"`, pas `"REJECTED"`). Comparer en
+    capitales silencieusement faisait tomber tout état réel dans le défaut
+    `ENVOYEE` — y compris une offre réellement rejetée, qui restait alors
+    « ouverte » aux yeux du journal (voir MESURES.md).
 
     Ne couvre que ce dont la réconciliation a besoin en lot L2 (import) —
     la machine à états complète (motif par motif) arrive au lot L7.
     """
-    if etat_brut == "ACCEPTED":
+    etat_normalise = etat_brut.upper()
+    if etat_normalise == "ACCEPTED":
         return EtatOffre.ACCEPTEE
-    if etat_brut == "REJECTED":
+    if etat_normalise == "REJECTED":
         return EtatOffre.REFUSEE
-    if etat_brut == "CANCELLED":
+    if etat_normalise == "CANCELLED":
         return EtatOffre.ANNULEE
     return EtatOffre.ENVOYEE
 
@@ -241,6 +251,29 @@ def reconcilier(session: Session, client: SorareClient, horloge: Horloge) -> Rap
 
     rapport = apparier(lignes, offres)
 
+    # `apparier()` (pure) ne compare que contre les lignes *ouvertes* — c'est
+    # son contrat documenté, et il reste correct pour l'appariement lui-même.
+    # Mais une offre déjà importée puis close (refusée/acceptée/annulée)
+    # n'apparaît plus dans `lignes_ouvertes()` : sans ce filtre, `a_importer`
+    # la redésignerait comme « à importer » à *chaque* réconciliation, pour
+    # toujours — ce qui (a) tenterait de la réinsérer avec le même
+    # `sorare_id` (violation d'unicité, plantage observé au premier run réel,
+    # lot L6, MESURES.md 2026-09-21) et (b), même une fois l'insertion
+    # protégée, laisserait `rapport.cycle_suspendu` bloqué à `True` en
+    # permanence dès qu'une seule offre manuelle a un jour existé sur le
+    # compte — l'exact contraire du but de cette suspension (signaler une
+    # dépense *nouvelle*, pas ressasser l'historique connu). On retire donc
+    # de `a_importer` tout ce qui porte déjà un `sorare_id` connu du journal,
+    # dans n'importe quel état, avant même de regarder `cycle_suspendu`.
+    sorare_ids_deja_connus = {
+        sid for (sid,) in session.query(OffreJournal.sorare_id).filter(
+            OffreJournal.sorare_id.isnot(None)
+        )
+    }
+    rapport.a_importer = [
+        offre for offre in rapport.a_importer if offre.sorare_id not in sorare_ids_deja_connus
+    ]
+
     maintenant = horloge.maintenant()
     for offre in rapport.a_importer:
         journal.importer_ligne_manuelle(
@@ -252,7 +285,7 @@ def reconcilier(session: Session, client: SorareClient, horloge: Horloge) -> Rap
             montant_offre_devise=Devise(offre.montant_devise),
             etat=etat_depuis_sorare(offre.etat_brut),
             motif_refus=motif_refus_depuis_sorare(offre.motif_refus_brut)
-            if offre.etat_brut == "REJECTED"
+            if offre.etat_brut.upper() == "REJECTED"
             else None,
             reponse_brute=json.dumps(offre.reponse_brute, ensure_ascii=False),
             creee_le=offre.creee_le,

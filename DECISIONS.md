@@ -242,3 +242,68 @@ L1 montrait que `prepareOffer` ne demandait pas d'autorisation (paramètres inva
 L5 anticipe pas de signature, donc `approvals=[]` dans `createDirectOffer`.
 L6 confirmera (vraie carte réelle, assetId valide) si une signature est demandée,
 et L5 servira de squelette pour la vraie implémentation.
+
+## 2026-09-21 — Lot L6 : premier envoi réel (code prêt, envoi laissé à l'utilisateur)
+
+**`Annonce` porte maintenant un `asset_id`.**
+`marche/types.py` ajoutait jusqu'ici une annonce sans identifiant de carte
+concrète — suffisant pour L3/L4 (décision pure, mockée). L6 a besoin du vrai
+`assetId` (`AnyCardInterface.assetId`) pour `prepareOffer`/`createDirectOffer`.
+Champ ajouté avec défaut `""` (ne casse pas les annonces mockées existantes) ;
+`paiement/preparation.py` lève `ValueError` s'il est vide au moment de
+préparer une offre réelle, au lieu de retomber sur l'`assetId` fictif de L5
+(`"test-asset-id-L5"`), qui ne peut plus jamais atteindre le réseau par erreur.
+
+**`annonces_marche()` implémentée avec `TokenRoot.liveSingleSaleOffers`.**
+Placeholder L4 (`NotImplementedError`) remplacé par une vraie requête GraphQL,
+portée du SDL local comme les autres requêtes du projet (`offres_envoyees`,
+`renouvellement`) — **non vérifiée contre l'API réelle** avant le premier
+`premiere_offre_reelle` (voir MESURES.md). Nouvelle requête
+`historique_prix_joueur()` (`TokenRoot.tokenPrices`) pour la référence de
+prix réelle d'un joueur — même statut.
+
+**Ambiguïté `senderSide`/`receiverSide` non tranchée, comme pour
+`offres_envoyees` (DECISIONS.md, lot L2) — traitée en code, pas en supposition
+figée.** Pour un `SINGLE_SALE_OFFER`, on ne sait pas sans l'avoir vérifié
+quel côté porte la carte à vendre et quel côté porte le prix. `marche/traduction.py`
+(`annonce_depuis_noeud_marche`) lit les deux côtés et retient celui qui porte
+une carte (et une seule — un lot est hors périmètre L6) comme la carte, l'autre
+comme le prix, plutôt que de figer une hypothèse qui pourrait être fausse.
+
+**Nouveau module `marche/traduction.py` : fonctions pures, testées sur cas
+figés.** Traduit les nœuds bruts (`liveSingleSaleOffers`, `tokenPrices`) vers
+les types du domaine (`Annonce`, `Vente`). Convention du projet respectée :
+aucun réseau ni base dans ces fonctions ; les requêtes brutes restent dans
+`sorare/requetes.py`.
+
+**`cli/premiere_offre_reelle.py` : script dédié L6, pas une extension du
+scanner (L4).** Le scanner (`cli/scanner.py`) appelle `client.etat_compte()`
+et `client.annonces_marche()`, des méthodes qui n'existent pas sur
+`SorareClient` (qui n'expose que `.execute()`) — un défaut préexistant du
+lot L4, jamais exécuté contre du réel (DECISIONS.md L4 le documentait déjà
+comme testé « sur données mockées, pas marché »). Le réécrire pour de vraies
+données (population liquide + références sur plusieurs joueurs) est un
+travail de portée L7-L9 (boucle complète), pas de L6 (« une seule offre »,
+PLAN.md). Le nouveau script est autonome : réconciliation obligatoire, état du
+compte réel, recherche de la candidate la moins chère **avec référence réelle
+valide** (>= 3 ventes/7j — sans ça, `journal.py` refuserait la ligne au niveau
+base), palier 70 %, puis la barrière (`envoyer_offre_proposal`) — même chemin
+unique que tout le reste du projet (`test_unique_path.py` le vérifie).
+
+**Sans les trois verrous du mode réel, le script ne fait qu'un aperçu — zéro
+écriture en base.** Contrairement au scanner (qui écrit toujours une ligne
+`SIMULEE`), un aperçu qui écrirait quand même occuperait le couple
+(joueur, vendeur) dans l'index unique et bloquerait le vrai essai suivant sur
+la même carte. Le script sert donc aussi de sonde en lecture seule pour
+vérifier la traduction du marché réel, sans aucun risque, avant de
+déverrouiller le mode réel.
+
+**L'envoi réel lui-même n'a pas été déclenché dans cette session.** Le code
+est prêt et testé (le chemin réseau reste non exécuté contre l'API, comme
+toutes les requêtes neuves du projet avant leur premier run réel) ; envoyer
+une offre engage un vrai paiement, c'est un geste que l'utilisateur pose
+lui-même :
+```
+python -m acheteur.cli.premiere_offre_reelle                    # aperçu, zéro risque
+ACHETEUR_MODE_REEL=1 python -m acheteur.cli.premiere_offre_reelle --mode-reel
+```

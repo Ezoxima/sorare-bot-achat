@@ -44,7 +44,9 @@ mutation CreateDirectOffer($input: createDirectOfferInput!) {
       status
       createdAt
       receiver {
-        slug
+        ... on User {
+          slug
+        }
       }
     }
     errors {

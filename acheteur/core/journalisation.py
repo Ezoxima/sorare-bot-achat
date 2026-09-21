@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 
 # JWT (trois segments base64url séparés par des points).
 _MOTIF_JWT = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
@@ -33,11 +34,32 @@ class MasqueSecretsFilter(logging.Filter):
         return True
 
 
+def _forcer_utf8_console() -> None:
+    """Bascule stdout/stderr en UTF-8 si la console ne l'est pas déjà.
+
+    Les CLI du projet impriment des symboles (✓, ✗, ⚠, €) qui n'existent pas
+    dans l'encodage par défaut d'une console Windows (`cp1252`) — un premier
+    run réel (lot L6, MESURES.md 2026-09-21) a planté sur `⚠` avant même
+    d'afficher un message d'alerte pourtant important (cycle suspendu).
+    `reconfigure` est un no-op si le flux est déjà en UTF-8 (ex. terminal
+    Unix) ; enveloppé dans un `try` parce que certains flux redirigés
+    (fichier déjà ouvert, pipe fermé) ne le supportent pas.
+    """
+    for flux in (sys.stdout, sys.stderr):
+        if getattr(flux, "encoding", "").lower() not in ("utf-8", "utf8"):
+            try:
+                flux.reconfigure(encoding="utf-8")
+            except (AttributeError, ValueError, OSError):
+                pass
+
+
 def configurer_journalisation(niveau: int = logging.INFO) -> None:
     """Installe le filtre de masquage sur le logger racine.
 
     Idempotent : n'ajoute pas le filtre en double si déjà appelé.
     """
+    _forcer_utf8_console()
+
     racine = logging.getLogger()
     racine.setLevel(niveau)
 

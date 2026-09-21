@@ -26,7 +26,9 @@ from acheteur.negociation.reconciliation import (
     depuis_reponse_sorare,
     etat_depuis_sorare,
     motif_refus_depuis_sorare,
+    reconcilier,
 )
+from acheteur.core.horloge import HorlogeFigee
 
 BASE = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 
@@ -247,6 +249,16 @@ class TestTraductionMotifsEtEtats:
         assert etat_depuis_sorare("CANCELLED") == EtatOffre.ANNULEE
         assert etat_depuis_sorare("OPENED") == EtatOffre.ENVOYEE
 
+    def test_etats_en_minuscules_comme_renvoyes_par_l_api_reelle(self):
+        """`TokenOffer.status` est un `String!`, pas un enum GraphQL : le
+        premier run réel (lot L6, MESURES.md 2026-09-21) a montré qu'il
+        renvoie des valeurs en minuscules. Une comparaison sensible à la
+        casse faisait tomber une offre réellement rejetée dans le défaut
+        ENVOYEE — donc « toujours ouverte » aux yeux du journal."""
+        assert etat_depuis_sorare("accepted") == EtatOffre.ACCEPTEE
+        assert etat_depuis_sorare("rejected") == EtatOffre.REFUSEE
+        assert etat_depuis_sorare("cancelled") == EtatOffre.ANNULEE
+
 
 class TestDepuisReponseSorare:
     def test_parse_un_noeud_complet(self):
@@ -289,3 +301,60 @@ class TestDepuisReponseSorare:
             }
         ]
         assert depuis_reponse_sorare(noeuds) == []
+
+
+class _ClientFactice:
+    """Renvoie toujours les mêmes nœuds `offres_envoyees`, sans réseau."""
+
+    def __init__(self, noeuds: list[dict]) -> None:
+        self._noeuds = noeuds
+
+    def execute(self, query: str, variables: dict | None = None) -> dict:
+        assert "tokenOffers" in query
+        return {"currentUser": {"tokenOffers": {"nodes": self._noeuds}}}
+
+
+def _noeud_offre_close(sorare_id: str, statut: str = "rejected") -> dict:
+    return {
+        "id": sorare_id,
+        "status": statut,
+        "rejectionReason": None,
+        "createdAt": "2026-09-20T12:00:00+00:00",
+        "settlementCurrencies": ["EUR"],
+        "receiver": {"slug": "alice"},
+        "senderSide": {"amounts": {"eurCents": 500, "wei": "0"}},
+        "receiverSide": {"anyCards": [{"assetId": "a1", "anyPlayer": {"slug": "messi"}}]},
+    }
+
+
+class TestReconcilierIdempotent:
+    """`reconcilier()` doit pouvoir tourner deux fois de suite sans planter.
+
+    Régression : le premier run réel (lot L6, MESURES.md 2026-09-21) a
+    planté au *deuxième* `reconcilier` d'affilée avec `UNIQUE constraint
+    failed: offres_journal.sorare_id`. Cause : `apparier()` (pure) ne
+    compare que contre les lignes *ouvertes* (`lignes_ouvertes`) — une
+    offre déjà importée puis close (refusée/acceptée/annulée) redevenait
+    « à importer » à chaque nouveau run, et `reconcilier()` tentait de la
+    réinsérer avec le même `sorare_id`.
+    """
+
+    def test_offre_close_deja_importee_n_est_pas_reimportee(self, session: Session):
+        client = _ClientFactice([_noeud_offre_close("off-close-1")])
+        horloge = HorlogeFigee(BASE)
+
+        premier = reconcilier(session, client, horloge)
+        assert len(premier.a_importer) == 1
+        assert premier.cycle_suspendu is True
+        assert session.query(OffreJournal).count() == 1
+
+        # Deuxième run : mêmes offres côté Sorare (pas de réseau réel, donc
+        # pas de nouveauté) — ne doit ni planter, ni dupliquer la ligne, ni
+        # rester indéfiniment suspendu à cause d'une offre déjà connue.
+        deuxieme = reconcilier(session, client, horloge)
+        assert deuxieme.a_importer == []
+        assert deuxieme.cycle_suspendu is False
+        assert session.query(OffreJournal).count() == 1
+        ligne = session.query(OffreJournal).one()
+        assert ligne.sorare_id == "off-close-1"
+        assert ligne.etat == EtatOffre.REFUSEE

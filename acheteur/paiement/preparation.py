@@ -34,14 +34,24 @@ def _construire_input_prepare_offer(
         montant_total = proposition.montant_offre
         vendeur_slug = annonce.vendeur_slug
 
-        # L5 : utiliser un assetId de test pour la chaîne de préparation/signature
-        # L6 remplacera par le vrai assetId depuis annonces_marche()
-        asset_ids = ["test-asset-id-L5"]
+        if not annonce.asset_id:
+            raise ValueError(
+                f"Annonce sans asset_id pour {annonce.joueur.slug} — "
+                "impossible de préparer une offre réelle sur une annonce mockée/simulée."
+            )
+        asset_ids = [annonce.asset_id]
     else:  # PropositionGroupe
         devise = proposition.annonces[0].prix_demande.devise
         montant_total = proposition.montant_total
         vendeur_slug = proposition.annonces[0].vendeur_slug
-        asset_ids = ["test-asset-id-L5"] * len(proposition.annonces)
+
+        for a in proposition.annonces:
+            if not a.asset_id:
+                raise ValueError(
+                    f"Annonce sans asset_id pour {a.joueur.slug} — "
+                    "impossible de préparer une offre réelle sur une annonce mockée/simulée."
+                )
+        asset_ids = [a.asset_id for a in proposition.annonces]
 
     # Convertir montant en format Sorare (string)
     if devise == Devise.ETH:

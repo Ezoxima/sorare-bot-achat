@@ -85,7 +85,9 @@ query OffresEnvoyees($first: Int!) {
         createdAt
         settlementCurrencies
         receiver {
-          slug
+          ... on User {
+            slug
+          }
         }
         senderSide {
           amounts {
@@ -118,18 +120,151 @@ def offres_envoyees(client: SorareClient, premieres: int = 100) -> list[dict[str
     return data["currentUser"]["tokenOffers"]["nodes"]
 
 
-def annonces_marche(client: SorareClient) -> list[dict[str, Any]]:
-    """Les annonces actuelles du marché (offres ouvertes pour achat).
+# NON VÉRIFIÉE contre l'API réelle (voir MESURES.md). Portée du SDL local
+# (`TokenRoot.liveSingleSaleOffers` — schema/sorare_schema.graphql:30431) :
+# les annonces à prix fixe posées par un vendeur (par opposition aux
+# enchères, `TokenAuction`, hors périmètre du projet). À confirmer par la
+# sonde `acheteur/cli/sonde_annonces_marche.py` avant tout usage en L6.
+#
+# Ambiguïté délibérément non tranchée ici, comme pour `offres_envoyees`
+# (DECISIONS.md, lot L2) : on ne sait pas encore, sans l'avoir vérifié
+# contre l'API réelle, quel côté (`senderSide`/`receiverSide`) porte la
+# carte à vendre et quel côté porte le prix demandé pour un
+# `SINGLE_SALE_OFFER`. `acheteur.marche.traduction.annonce_depuis_noeud_marche`
+# lit les deux côtés et prend celui qui porte des cartes / celui qui porte
+# un montant, plutôt que de figer une hypothèse fausse en dur.
+ANNONCES_MARCHE_QUERY = """
+query AnnoncesMarche($first: Int!, $playerSlug: String) {
+  tokens {
+    liveSingleSaleOffers(first: $first, playerSlug: $playerSlug) {
+      nodes {
+        id
+        status
+        type
+        createdAt
+        userSeller {
+          slug
+        }
+        senderSide {
+          amounts {
+            eurCents
+            wei
+          }
+          anyCards {
+            assetId
+            rarityTyped
+            inSeasonEligible
+            anyPlayer {
+              slug
+              displayName
+            }
+          }
+        }
+        receiverSide {
+          amounts {
+            eurCents
+            wei
+          }
+          anyCards {
+            assetId
+            rarityTyped
+            inSeasonEligible
+            anyPlayer {
+              slug
+              displayName
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
-    À L4 (lot courant), c'est un placeholder : le scanner teste la chaîne
-    de décision sur des données mockées, pas sur le marché réel.
-    À L6+, remplacer par une vraie requête GraphQL selon le schéma Sorare.
+
+def annonces_marche(
+    client: SorareClient, premieres: int = 100, joueur_slug: str | None = None
+) -> list[dict[str, Any]]:
+    """Les annonces actuelles du marché à prix fixe (`liveSingleSaleOffers`).
+
+    Ne fait que lire et aplatir la réponse brute — la traduction vers le
+    type `Annonce` du domaine vit dans `acheteur.marche.traduction`
+    (fonction pure, testable sur des cas figés, comme le reste du projet).
+
+    Args:
+        client: client GraphQL Sorare
+        premieres: nombre maximum d'annonces à récupérer (non paginé)
+        joueur_slug: filtre optionnel sur un seul joueur
 
     Returns:
-        liste des annonces brutes du marché
+        liste des annonces brutes (`TokenOffer` nodes) du marché
     """
-    # TODO(L6) : implémenter la vraie requête GraphQL selon le schéma Sorare
-    # Pour l'instant, lever une exception pour rappeler que c'est à faire
-    raise NotImplementedError(
-        "annonces_marche() est un placeholder L4. À implémenter L6 selon le schéma Sorare."
+    data = client.execute(
+        ANNONCES_MARCHE_QUERY,
+        variables={"first": premieres, "playerSlug": joueur_slug},
     )
+    return data["tokens"]["liveSingleSaleOffers"]["nodes"]
+
+
+# NON VÉRIFIÉE contre l'API réelle. Portée du SDL local
+# (`TokenRoot.tokenPrices` — schema/sorare_schema.graphql:30462) : historique
+# des ventes réglées pour un joueur et une rareté donnés, ce dont
+# `acheteur.marche.reference_prix` a besoin pour calculer une référence de
+# marché réelle (médiane, fenêtre glissante, minimum de ventes — DECISIONS.md
+# lot L3).
+HISTORIQUE_PRIX_QUERY = """
+query HistoriquePrixJoueur($playerSlug: String!, $rarity: Rarity!, $first: Int, $from: ISO8601DateTime, $seasonEligibility: SeasonEligibility) {
+  tokens {
+    tokenPrices(playerSlug: $playerSlug, rarity: $rarity, first: $first, from: $from, seasonEligibility: $seasonEligibility) {
+      amounts {
+        eurCents
+        wei
+      }
+      date
+    }
+  }
+}
+"""
+
+
+def historique_prix_joueur(
+    client: SorareClient,
+    joueur_slug: str,
+    rarete: str,
+    premieres: int = 50,
+    depuis: str | None = None,
+    season_eligibility: str | None = None,
+) -> list[dict[str, Any]]:
+    """Historique des ventes réglées d'un joueur (une rareté), non traduit.
+
+    Args:
+        client: client GraphQL Sorare
+        joueur_slug: le joueur concerné
+        rarete: rareté Sorare en minuscules (ex. "limited", "rare") — voir
+            l'enum `Rarity` du schéma
+        premieres: nombre maximum de ventes à récupérer (l'API plafonne à 20,
+            constaté au premier run réel, lot L6 — non documenté dans le SDL)
+        depuis: horodatage ISO8601 optionnel, borne inférieure
+        season_eligibility: `"CLASSIC"` ou `"IN_SEASON"` (enum `SeasonEligibility`
+            du schéma). Une carte classic et une carte in-season du même
+            joueur/rareté ne se vendent pas au même prix (l'in-season est
+            éligible aux compétitions en cours) — sans ce filtre, la médiane
+            mélange deux populations de prix qui n'ont rien à voir (constaté
+            en session, voir MESURES.md : la référence calculée pour une
+            annonce classic ne correspondait à aucune réalité de marché).
+            `None` = pas de filtre (comportement d'avant ce correctif).
+
+    Returns:
+        liste des ventes brutes (`TokenPrice`)
+    """
+    data = client.execute(
+        HISTORIQUE_PRIX_QUERY,
+        variables={
+            "playerSlug": joueur_slug,
+            "rarity": rarete,
+            "first": premieres,
+            "from": depuis,
+            "seasonEligibility": season_eligibility,
+        },
+    )
+    return data["tokens"]["tokenPrices"]
