@@ -1140,3 +1140,58 @@ donc un second chantier (paginer `liveSingleSaleOffers` via
 `after`/`hasNextPage`, champ confirmé dans le SDL,
 schema/sorare_schema.graphql:30431) — pas fait dans cette session, à la
 demande explicite de l'utilisateur (batching d'abord, mesurer ensuite).
+
+## 2026-09-22 — Persistance de la liste des joueurs liquides (préparation L9)
+
+Suite à la question de l'utilisateur sur la tâche planifiée périodique
+(lot L9, PLAN.md) : définition de la liste des joueurs liquides et de son
+délai de rafraîchissement, avant tout code de boucle.
+
+**Découpage retenu** (même principe que `sealing-sorare-apps-script`,
+`majListeBonnesAffaires`/`lireCouplesSuivis_`) : un job lent
+(`cli/maj_liste_liquidite.py`, nouveau) reconstruit périodiquement une
+liste persistée des couples (joueur, rareté, éligibilité de saison)
+liquides (table `joueurs_liquides`, `marche/liste_liquidite.py`) ; un futur
+job rapide (L9, pas encore écrit) ne fera que la LIRE au lieu de recalculer
+la liquidité de zéro à chaque passage.
+
+**Délai de rafraîchissement : 24h**, choix explicite de l'utilisateur
+(option recommandée) — aligné sur le `.gs` d'origine. La liquidité se
+mesure sur une fenêtre de 30 jours à granularité hebdomadaire
+(`marche/liquidite.py`) : elle ne bouge pas assez vite pour justifier un
+recalcul plus fréquent, et ce choix garde le coût réseau de la
+reconstruction (le scan du marché + les lots de prix) une fois par jour.
+
+**Ce que la table NE stocke PAS** : aucune référence de prix. Seul le fait
+qu'un couple est liquide (plus les compteurs `n30`/`n7`/`semaines_actives`,
+gardés pour le diagnostic) est persisté — la référence de prix doit
+toujours être recalculée fraîche au moment de la décision d'achat (PLAN.md :
+« figer la référence de marché au moment de l'envoi », pas avant).
+
+**Remplacement complet, pas incrémental** (`remplacer_liste_liquidite`) :
+un couple qui n'est plus liquide doit disparaître de la liste au
+rafraîchissement suivant, pas y traîner avec un vieil horodatage.
+
+**Horodatage du dernier rafraîchissement dans une table à part**
+(`meta_liste_liquidite`, ligne unique) plutôt que `MAX(joueurs_liquides.maj_le)` :
+un rafraîchissement qui ne retiendrait aucun couple (liste vide, cas limite
+mais possible si le marché est temporairement peu liquide) aurait sinon
+fait perdre la trace du fait qu'il a bien eu lieu, faisant passer une liste
+tout juste reconstruite pour périmée (`liste_perimee`).
+
+**Bug SQLite découvert en écrivant les tests** : un `datetime` stocké via
+`Mapped[datetime]` (comme partout ailleurs dans ce projet, ex.
+`negociation/journal.py`) est relu SANS fuseau horaire par SQLite, même
+écrit avec un `Horloge` en UTC. `derniere_maj()` rattache donc `UTC`
+explicitement à la lecture — sans ce correctif, `liste_perimee` aurait levé
+`TypeError` (comparaison naïf/aware) en production dès le premier appel
+réel. Les autres colonnes `datetime` du projet (`OffreJournal.cree_le`/
+`maj_le`) portent probablement le même défaut mais n'ont, à ce jour, jamais
+été comparées après relecture — non corrigé ici (hors périmètre de cette
+session), à surveiller si un jour elles le sont.
+
+**Reste hors périmètre de cette session** : le job rapide qui LIT cette
+liste (le cœur de L9), la déduplication d'`annonces_marche` reste bornée
+par la limite de pagination déjà connue (~50 nœuds réels, voir MESURES.md
+2026-09-21) — `cli/maj_liste_liquidite.py` en hérite tel quel pour
+l'instant.
