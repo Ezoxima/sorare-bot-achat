@@ -15,7 +15,7 @@ from pathlib import Path
 
 from acheteur.core.horloge import Horloge
 from acheteur.decision.proposition import PropositionGroupe, PropositionSimple
-from acheteur.marche.devises import Devise, Montant
+from acheteur.marche.devises import MAILLE_ETH_WEI, Devise, Montant
 
 
 class GuardrailViolation(Exception):
@@ -31,9 +31,28 @@ def verifier_solde_suffisant(
 ) -> None:
     """Règle 1 : somme des offres ouvertes ≤ solde disponible du rail.
 
+    PLAN.md : « Dix offres à 3€ sur 12€ de solde peuvent toutes aboutir » —
+    le risque visé est plusieurs offres décidées dans le **même** cycle,
+    dont chacune semble tenir seule dans le solde mais pas ensemble.
+
+    **`soldes_ouverts` ne doit PAS inclure les offres réelles déjà ouvertes
+    avant ce cycle** (constaté contre le compte réel, 2026-09-21, signalé
+    par l'utilisateur — voir DECISIONS.md/MESURES.md) : `solde_disponible`,
+    tel que renvoyé par Sorare (`currentUser.availableBalance(s)`), les
+    soustrait déjà — `totalBalance - availableBalance` colle exactement à la
+    somme des offres réellement ouvertes sur le compte au moment du test.
+    Les compter une seconde fois ici rendrait la règle plus restrictive que
+    prévu, jusqu'à refuser des envois pourtant finançables. `soldes_ouverts`
+    ne sert qu'à cumuler les montants des offres **déjà décidées dans ce
+    même cycle** mais pas encore reflétées dans `solde_disponible` (envoyées
+    après la lecture du solde) — `0` tant qu'un cycle n'envoie qu'une seule
+    offre.
+
     Args:
         montant_total_propose: montant qu'on s'apprête à ajouter
-        soldes_ouverts: somme des offres déjà ouvertes (en attente)
+        soldes_ouverts: montants déjà décidés dans ce cycle, pas encore
+            reflétés dans `solde_disponible` (PAS la somme des offres
+            réelles déjà ouvertes avant ce cycle — voir ci-dessus)
         solde_disponible: solde du compte sur ce rail
 
     Raises:
@@ -91,25 +110,34 @@ def verifier_offre_ne_depasse_pas_prix_demande(
 def verifier_coherence_unites(montant: int, devise: Devise) -> None:
     """Règle 4 : cohérence d'unité ETH/centimes.
 
-    ETH a 18 décimales (wei). Un entier petit (< 10^15) dans ETH est presque
-    sûrement des centimes non convertis. Un montant nul est interdit.
+    ETH a 18 décimales (wei). Un montant nul est interdit. Un montant en ETH
+    qui n'est pas un multiple exact de la maille du carnet Sorare (0.0001
+    ETH = `MAILLE_ETH_WEI`, ~20-25 centimes — signalé par l'utilisateur,
+    2026-09-21) n'a aucune chance d'être un montant réellement négociable :
+    soit c'est un bug d'unité (des centimes passés tels quels comme des
+    wei), soit c'est un montant calculé sans être arrondi à la maille
+    (voir `decision.proposition._arrondir_si_eth`, censé le faire en amont —
+    cette règle est le filet de sécurité, pas le mécanisme de calcul).
+
+    Remplace l'ancien seuil arbitraire (`< 10**15`) : il rejetait à tort tout
+    montant ETH légitimement petit mais valide (une carte à 0,0001-0,0009 ETH
+    est un prix réel sur ce marché, pas une erreur d'unité).
 
     Args:
         montant: valeur numérique
         devise: devise (ETH ou EUR)
 
     Raises:
-        GuardrailViolation: si montant est 0 ou unité suspecte
+        GuardrailViolation: si montant est 0/négatif, ou hors maille en ETH
     """
     if montant <= 0:
         raise GuardrailViolation(f"Montant nul ou négatif : {montant}")
 
-    if devise == Devise.ETH:
-        # Un wei < 10^15 n'a pas assez de décimales pour être un vrai prix en ETH
-        if montant < 10**15:
-            raise GuardrailViolation(
-                f"Wei suspectemet petit ({montant}) — possiblement centimes non convertis"
-            )
+    if devise == Devise.ETH and montant % MAILLE_ETH_WEI != 0:
+        raise GuardrailViolation(
+            f"Montant ETH hors maille ({montant} wei, maille {MAILLE_ETH_WEI} wei) — "
+            "possiblement centimes non convertis, ou montant non arrondi avant envoi"
+        )
 
 
 def verifier_taux_change_frais(

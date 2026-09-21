@@ -8,12 +8,20 @@ réelle → barrière → prepareOffer → createDirectOffer) fonctionne de bout
 bout. La machine à états complète (escalade, veille, contre-offres) reste
 hors périmètre : c'est le lot L7.
 
-Sélection : parmi les annonces à prix fixe du marché (`liveSingleSaleOffers`),
-triées par prix croissant, on retient la première qui a une référence de
-prix réelle valide (médiane sur 7 jours, au moins 3 ventes — contrainte
-portée par la base, `negociation/journal.py`). Ce n'est *pas* nécessairement
-« la carte la moins chère absolue » si les moins chères n'ont pas assez
-d'historique — impossible d'enregistrer une ligne sans référence.
+Sélection : parmi les 100 annonces à prix fixe les plus récemment mises à
+jour sur l'ensemble du marché (`liveSingleSaleOffers`, triée par fraîcheur
+côté API — pas par prix), triées ici par prix croissant, on retient la
+première qui a une référence de prix réelle valide (médiane sur 7 jours,
+au moins 3 ventes de même rareté et même éligibilité de saison — contrainte
+portée par la base, `negociation/journal.py`).
+
+**Ce n'est pas la carte la moins chère du marché entier, seulement la moins
+chère de cet échantillon glissant** (DECISIONS.md, 2026-09-21) : une annonce
+plus ancienne et moins chère peut exister ailleurs sur le marché sans
+apparaître dans les 100 annonces les plus fraîches. Suffisant pour L6 (prouver
+que l'envoi réel fonctionne) ; élargir la recherche (pagination, ou
+`liveSingleSaleOffers(playerSlug:)` par joueur sur la population liquide de
+L3) est un sujet de portée L7+.
 
 Mode réel à trois verrous (PLAN.md § Garde-fous, règle 9), comme partout
 ailleurs dans le projet :
@@ -45,13 +53,16 @@ from acheteur.core.db import creer_tables, session_scope
 from acheteur.core.horloge import Horloge, HorlogeSysteme
 from acheteur.core.journalisation import configurer_journalisation
 from acheteur.decision import Palier, proposer_simple
+from acheteur.decision.selecteur import est_bonne_affaire
 from acheteur.garde_fous import ContexteBarriere, GuardrailViolation, envoyer_offre_proposal
 from acheteur.marche import (
     Annonce,
     Devise,
     Montant,
     annonces_depuis_noeuds_marche,
+    rarity_brute_depuis_annonce,
     reference_prix_joueur,
+    season_eligibility_brute_depuis_annonce,
     ventes_depuis_noeuds_prix,
 )
 from acheteur.negociation import lignes_ouvertes, reconcilier
@@ -64,35 +75,46 @@ NOMBRE_ANNONCES_EXAMINEES = 100
 NOMBRE_VENTES_EXAMINEES = 20
 
 
-def _rarity_brute(annonce: Annonce) -> str:
-    """Reconstruit la valeur brute de l'enum `Rarity` Sorare depuis le nom
-    lisible stocké sur `Rareté` (« Super Rare » -> « super_rare »)."""
-    return annonce.joueur.rareté.nom.lower().replace(" ", "_")
-
-
-def _season_eligibility_brute(annonce: Annonce) -> str:
-    """`SeasonEligibility` Sorare (`CLASSIC`/`IN_SEASON`) depuis `Annonce.in_season`.
-
-    Une carte in-season (éligible aux compétitions en cours) et une carte
-    classic du même joueur/rareté ne se vendent pas au même prix : sans ce
-    filtre sur `tokenPrices`, la référence mélange deux populations de
-    ventes sans rapport (constaté en session, lot L6, voir MESURES.md).
-    """
-    return "IN_SEASON" if annonce.in_season else "CLASSIC"
-
-
 def trouver_meilleure_candidate(
-    client: SorareClient, horloge: Horloge
+    client: SorareClient,
+    horloge: Horloge,
+    devise: Devise | None = None,
+    seuil_pourcent: int = 90,
 ) -> tuple[Annonce, Montant] | None:
     """Cherche, parmi les annonces les moins chères du marché, la première
-    qui a une référence de prix réelle valide.
+    qui a une référence de prix réelle valide **et** qui est une bonne
+    affaire (`decision.selecteur.est_bonne_affaire`, prix demandé <=
+    `seuil_pourcent` % de la référence).
+
+    Bug réel trouvé en conditions réelles (2026-09-21, voir DECISIONS.md) :
+    ce filtre était absent jusqu'ici — la fonction ne vérifiait qu'« a une
+    référence » (>= 3 ventes/7j), pas « le prix est intéressant ». Elle
+    pouvait donc retenir une candidate dont le prix demandé est très
+    au-dessus de sa propre référence (ex. carte qui se négocie
+    invariablement à 0,22 € mais dont le vendeur en demandait 0,40 € — le
+    bot l'a achetée à 0,28 €, en payant plus que la valeur réelle du
+    marché). `scan_marche.py` appliquait déjà ce filtre ; il manquait ici.
+
+    Args:
+        devise: si fourni, ne considère que les annonces dans cette devise.
+            Sans filtre, le tri mélange centimes EUR et wei ETH sur la même
+            échelle numérique — un prix EUR (quelques centaines) passe
+            presque toujours avant un prix ETH (10^14+), donc en pratique
+            aucune candidate ETH n'était jamais retenue (constaté en session
+            réelle, 2026-09-21 : seul le rail ETH est signable pour l'instant,
+            voir DECISIONS.md — filtrer permet de tester ce rail précisément).
+        seuil_pourcent: seuil de bonne affaire (défaut 90%, comme
+            `scan_marche.py` et `decision/selecteur.py`).
 
     Returns:
         (annonce, référence de prix) ou None si aucune candidate n'a de
-        référence exploitable parmi celles examinées.
+        référence exploitable **et** n'est une bonne affaire parmi celles
+        examinées.
     """
     noeuds_marche = requetes.annonces_marche(client, premieres=NOMBRE_ANNONCES_EXAMINEES)
     annonces = annonces_depuis_noeuds_marche(noeuds_marche)
+    if devise is not None:
+        annonces = [a for a in annonces if a.prix_demande.devise == devise]
     annonces.sort(key=lambda a: a.prix_demande.valeur)
 
     maintenant = horloge.maintenant()
@@ -100,9 +122,9 @@ def trouver_meilleure_candidate(
         noeuds_prix = requetes.historique_prix_joueur(
             client,
             annonce.joueur.slug,
-            _rarity_brute(annonce),
+            rarity_brute_depuis_annonce(annonce),
             premieres=NOMBRE_VENTES_EXAMINEES,
-            season_eligibility=_season_eligibility_brute(annonce),
+            season_eligibility=season_eligibility_brute_depuis_annonce(annonce),
         )
         ventes = ventes_depuis_noeuds_prix(noeuds_prix, annonce.joueur)
         reference = reference_prix_joueur(annonce.joueur, ventes, maintenant)
@@ -112,6 +134,8 @@ def trouver_meilleure_candidate(
             # Référence et prix demandé dans deux devises différentes :
             # rien à comparer, on passe à la candidate suivante plutôt que
             # de mélanger les unités (CLAUDE.md).
+            continue
+        if not est_bonne_affaire(annonce, reference, seuil_pourcent):
             continue
         return annonce, reference
 
@@ -128,17 +152,23 @@ def _soldes_reels(compte: dict) -> dict[Devise, Montant]:
     }
 
 
-def _offres_ouvertes_reelles(session: Session) -> tuple[dict[Devise, int], dict[str, int]]:
-    """Somme des offres réellement envoyées et encore ouvertes (pas les
-    lignes simulées : elles n'engagent aucun solde réel)."""
-    par_devise: dict[Devise, int] = {}
+def _offres_ouvertes_par_vendeur_reelles(session: Session) -> dict[str, int]:
+    """Nombre d'offres réellement envoyées et encore ouvertes, par vendeur —
+    pour la règle 7 (anti-démarchage), pas pour un calcul de solde.
+
+    Ne compte QUE le nombre d'offres par vendeur, jamais leur montant cumulé
+    par devise : `ContexteBarriere.soldes_par_devise` (le solde tel que
+    Sorare le renvoie) a déjà déduit ces offres réelles ouvertes —
+    `totalBalance - availableBalance` colle exactement à leur somme
+    (constaté contre le compte réel, 2026-09-21, signalé par l'utilisateur).
+    Les recompter dans `offres_ouvertes_par_devise` rendrait la règle 1 plus
+    restrictive que prévu. Ce script n'envoie qu'une seule offre par
+    exécution, donc `offres_ouvertes_par_devise` reste `{}` (voir plus bas) :
+    rien n'a encore été décidé dans ce cycle avant cette offre-ci."""
     par_vendeur: dict[str, int] = {}
     for ligne in lignes_ouvertes(session, mode_simulation=False):
-        par_devise[ligne.montant_offre_devise] = (
-            par_devise.get(ligne.montant_offre_devise, 0) + ligne.montant_offre_valeur
-        )
         par_vendeur[ligne.vendeur_slug] = par_vendeur.get(ligne.vendeur_slug, 0) + 1
-    return par_devise, par_vendeur
+    return par_vendeur
 
 
 def _afficher_proposition(annonce: Annonce, reference: Montant, montant_offre: int) -> None:
@@ -170,6 +200,21 @@ def main() -> int:
         "--mode-reel",
         action="store_true",
         help="Deuxième des trois verrous du mode réel (voir PLAN.md § Garde-fous, règle 9).",
+    )
+    parser.add_argument(
+        "--devise",
+        choices=["EUR", "ETH"],
+        default=None,
+        help="Ne considérer que les annonces dans cette devise. Sans filtre, une "
+        "candidate EUR est presque toujours choisie (voir docstring de "
+        "trouver_meilleure_candidate) — seul le rail ETH est signable actuellement.",
+    )
+    parser.add_argument(
+        "--seuil",
+        type=int,
+        default=90,
+        help="Seuil de bonne affaire, en %% de la référence (défaut 90, "
+        "comme scan_marche.py).",
     )
     args = parser.parse_args()
 
@@ -205,9 +250,13 @@ def main() -> int:
         print()
 
         # === 3. RECHERCHE DE LA CANDIDATE ===
-        print(f"Recherche de la carte la moins chère avec référence réelle "
-              f"(parmi {NOMBRE_ANNONCES_EXAMINEES} annonces)...")
-        candidate = trouver_meilleure_candidate(client, horloge)
+        print(f"Recherche de la moins chère avec référence réelle "
+              f"(parmi les {NOMBRE_ANNONCES_EXAMINEES} annonces les plus récentes du "
+              f"marché, pas forcément les moins chères du marché entier)...")
+        devise_filtre = Devise[args.devise] if args.devise else None
+        candidate = trouver_meilleure_candidate(
+            client, horloge, devise=devise_filtre, seuil_pourcent=args.seuil
+        )
         if candidate is None:
             print("Aucune candidate : aucune des annonces examinées n'a une référence "
                   "de prix réelle valide (>= 3 ventes sur 7 jours). Fin.")
@@ -218,11 +267,14 @@ def main() -> int:
         _afficher_proposition(annonce, reference, proposition.montant_offre)
 
         # === 4. CONTEXTE BARRIÈRE (soldes/offres ouvertes RÉELS) ===
-        offres_ouvertes_devise, offres_ouvertes_vendeur = _offres_ouvertes_reelles(session)
+        # `soldes` (Sorare) a déjà déduit toutes les offres réelles ouvertes
+        # avant ce cycle — offres_ouvertes_par_devise reste vide : ce script
+        # ne décide qu'une seule offre par exécution (voir
+        # _offres_ouvertes_par_vendeur_reelles ci-dessus, et DECISIONS.md).
         contexte = ContexteBarriere(
             soldes_par_devise=soldes,
-            offres_ouvertes_par_devise=offres_ouvertes_devise,
-            offres_ouvertes_par_vendeur=offres_ouvertes_vendeur,
+            offres_ouvertes_par_devise={},
+            offres_ouvertes_par_vendeur=_offres_ouvertes_par_vendeur_reelles(session),
             solde_timestamp=horloge.maintenant(),
             taux_change_timestamp=None,  # pas de conversion : même devise offre/demande
             plafond_offres_par_vendeur=5,

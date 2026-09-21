@@ -15,12 +15,14 @@ from acheteur.decision import (
     proposer_simple,
 )
 from acheteur.marche import (
+    MAILLE_ETH_WEI,
     Annonce,
     Devise,
     Joueur,
     Montant,
     Rareté,
     Vente,
+    arrondir_wei_a_la_maille,
     population_liquide,
     reference_prix_joueur,
 )
@@ -275,3 +277,56 @@ class TestProposition:
         assert prop.montants_offre["messi"] == 750  # 75% * 1000
         assert prop.montants_offre["haaland"] == 1500  # 75% * 2000
         assert not prop.decote_appliquee
+
+    def test_proposition_simple_en_eth_arrondie_a_la_maille(self):
+        """Signalé par l'utilisateur (2026-09-21) : un montant en ETH doit
+        tomber sur la maille du carnet Sorare (0.0001 ETH = 10**14 wei),
+        sinon ce n'est pas un montant réellement négociable."""
+        joueur = Joueur("messi", "Messi", Rareté("Limited", 2))
+        # 70% de 12345 * 10**14 wei = 8641.5 * 10**14 -> tombe déjà pile,
+        # on choisit un prix qui ne l'est pas pour prouver l'arrondi.
+        annonce = Annonce(
+            joueur=joueur,
+            vendeur_slug="alice",
+            prix_demande=Montant(10**15 + 12345, Devise.ETH),
+            accepte_eth=True,
+            accepte_eur=False,
+            date_pose=datetime.now(),
+        )
+        prop = proposer_simple(annonce, 10**15, Palier.PREMIER)
+        assert prop.montant_offre % (10**14) == 0
+
+    def test_proposition_groupe_en_eth_arrondie_a_la_maille(self):
+        messi = Joueur("messi", "Messi", Rareté("Limited", 2))
+        haaland = Joueur("haaland", "Haaland", Rareté("Limited", 2))
+        annonces = [
+            Annonce(messi, "alice", Montant(10**15 + 6789, Devise.ETH), True, False, datetime.now()),
+            Annonce(haaland, "alice", Montant(2 * 10**15 + 4321, Devise.ETH), True, False, datetime.now()),
+        ]
+        references = {"messi": 10**15, "haaland": 2 * 10**15}
+        prop = proposer_groupe(annonces, references, Palier.PREMIER)
+        for montant in prop.montants_offre.values():
+            assert montant % (10**14) == 0
+
+
+class TestArrondiMailleEth:
+    """`arrondir_wei_a_la_maille` : maille du carnet Sorare en ETH, signalée
+    par l'utilisateur (2026-09-21) — 0.0001 ETH, ~20-25 centimes."""
+
+    def test_deja_sur_la_maille_inchange(self):
+        assert arrondir_wei_a_la_maille(3 * MAILLE_ETH_WEI) == 3 * MAILLE_ETH_WEI
+
+    def test_arrondit_vers_le_bas(self):
+        """Jamais vers le haut (PLAN.md) : on ne dépense jamais plus que ce
+        qui a été approuvé."""
+        valeur = 3 * MAILLE_ETH_WEI + 1
+        assert arrondir_wei_a_la_maille(valeur) == 3 * MAILLE_ETH_WEI
+
+    def test_petit_montant_tombe_a_zero(self):
+        """PLAN.md le prévoit explicitement : « un arrondi vers le bas peut
+        faire tomber le montant à zéro sur une petite carte » — à l'appelant
+        de traiter ce zéro comme un refus, pas à cette fonction de le cacher."""
+        assert arrondir_wei_a_la_maille(MAILLE_ETH_WEI - 1) == 0
+
+    def test_zero_reste_zero(self):
+        assert arrondir_wei_a_la_maille(0) == 0

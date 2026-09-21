@@ -100,11 +100,18 @@ def _parser_reponse_prepare_offer(
 
     if "authorizations" in payload and payload["authorizations"]:
         for auth in payload["authorizations"]:
+            request_brut = auth.get("request") or {}
             try:
-                request_type_str = auth.get("request", {}).get("__typename", "UNKNOWN")
+                request_type_str = request_brut.get("__typename", "UNKNOWN")
                 request_type = AuthorizationType(request_type_str)
             except ValueError:
                 request_type = AuthorizationType.NONE
+
+            # Les champs propres au type (contractAddress, senderAddress...)
+            # sont tout ce qui reste une fois `__typename` retiré — cf.
+            # PREPARE_OFFER_MUTATION, qui ne sélectionne ces champs que pour
+            # les types que ce projet sait signer (lot L7).
+            champs = {k: v for k, v in request_brut.items() if k != "__typename"}
 
             autorisations.append(
                 AuthorizationRequest(
@@ -112,6 +119,7 @@ def _parser_reponse_prepare_offer(
                     fingerprint=auth.get("fingerprint", ""),
                     request_type=request_type,
                     status=auth.get("status", ""),
+                    champs=champs,
                 )
             )
 

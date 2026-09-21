@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from acheteur.decision.paliers import Palier, montant_offre
+from acheteur.marche.devises import Devise, arrondir_wei_a_la_maille
 from acheteur.marche.types import Annonce
 
 
@@ -46,7 +47,12 @@ def montants_offre_groupe(
     montants = {}
     for annonce in annonces:
         if decote:
-            montants[annonce.joueur.slug] = (annonce.prix_demande.valeur * 65) // 100
+            montant = (annonce.prix_demande.valeur * 65) // 100
         else:
-            montants[annonce.joueur.slug] = montant_offre(annonce.prix_demande.valeur, palier)
+            montant = montant_offre(annonce.prix_demande.valeur, palier)
+        # Maille du carnet Sorare en ETH (0.0001 ETH) — voir proposition.py,
+        # même règle, doit rester en accord (test_montants_offre_groupe_coherent_avec_proposer_groupe).
+        if annonce.prix_demande.devise == Devise.ETH:
+            montant = arrondir_wei_a_la_maille(montant)
+        montants[annonce.joueur.slug] = montant
     return montants

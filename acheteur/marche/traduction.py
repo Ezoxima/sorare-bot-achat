@@ -42,6 +42,29 @@ def rarete_depuis_sorare(rarity_brute: str) -> Rareté:
     return _RARETES[rarity_brute]
 
 
+def rarity_brute_depuis_annonce(annonce: Annonce) -> str:
+    """Reconstruit la valeur brute de l'enum `Rarity` Sorare depuis le nom
+    lisible stocké sur `Rareté` (« Super Rare » -> « super_rare »).
+
+    Aller-retour exact avec `rarete_depuis_sorare` — testé (voir
+    `tests/test_premiere_offre_reelle_l6.py`). Partagée par tout script qui a
+    besoin de rappeler `tokenPrices` avec le même `rarity` que celui lu sur
+    une annonce (L6, L7).
+    """
+    return annonce.joueur.rareté.nom.lower().replace(" ", "_")
+
+
+def season_eligibility_brute_depuis_annonce(annonce: Annonce) -> str:
+    """`SeasonEligibility` Sorare (`CLASSIC`/`IN_SEASON`) depuis `Annonce.in_season`.
+
+    Une carte in-season (éligible aux compétitions en cours) et une carte
+    classic du même joueur/rareté ne se vendent pas au même prix : sans ce
+    filtre sur `tokenPrices`, la référence mélange deux populations de
+    ventes sans rapport (constaté en session, lot L6, voir MESURES.md).
+    """
+    return "IN_SEASON" if annonce.in_season else "CLASSIC"
+
+
 def _montant_depuis_amounts(amounts: dict[str, Any] | None) -> Montant | None:
     """Lit un `MonetaryAmount` brut. Préfère EUR ; sinon wei. `None` si les
     deux sont absents (rien n'a été demandé dans cette devise)."""

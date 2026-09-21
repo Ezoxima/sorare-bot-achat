@@ -18,6 +18,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 NOM_SERVICE_JETON = "acheteur-sorare"
+NOM_SERVICE_CLE_ETH = "acheteur-eth-cle-privee"
+NOM_SERVICE_CLE_STARKEX = "acheteur-starkex-cle-privee"
 
 
 class Settings(BaseSettings):

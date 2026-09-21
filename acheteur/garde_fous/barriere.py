@@ -35,7 +35,7 @@ from acheteur.garde_fous.regles import (
     verifier_taux_change_frais,
 )
 from acheteur.marche.devises import Devise, Montant
-from acheteur.negociation import enregistrer_ligne
+from acheteur.negociation.journal import enregistrer_ligne
 from acheteur.sorare.client import SorareClient
 from acheteur.paiement import preparation, signature
 
@@ -47,6 +47,15 @@ class ContexteBarriere:
     Rassemble tout ce dont les garde-fous ont besoin : soldes, offres ouvertes,
     taux de change, etc. Construit une fois au début du scan, réutilisé pour
     toutes les propositions.
+
+    `soldes_par_devise` (tel que renvoyé par Sorare) déduit déjà les offres
+    réelles déjà ouvertes avant ce cycle — `offres_ouvertes_par_devise` ne
+    doit donc contenir que les montants décidés **dans ce même cycle**, pas
+    encore reflétés dans ce solde (voir `garde_fous.regles.verifier_solde_suffisant`,
+    constaté contre le compte réel 2026-09-21, signalé par l'utilisateur).
+    `offres_ouvertes_par_vendeur` est un compteur différent (règle 7,
+    anti-démarchage, pas un budget) : lui compte bien toutes les offres
+    réelles déjà ouvertes, quel que soit le cycle.
     """
 
     soldes_par_devise: dict[Devise, Montant]
@@ -70,6 +79,7 @@ def envoyer_offre_proposal(
     montant_retape: int | None = None,
     chemin_racine: Path = Path("."),
     client: SorareClient | None = None,
+    offre_precedente_id: int | None = None,
 ) -> None:
     """Envoie une offre après vérification de tous les garde-fous.
 
@@ -89,6 +99,8 @@ def envoyer_offre_proposal(
         cli_arg_mode_reel: nécessaire si mode_simulation=False
         montant_retape: nécessaire si mode_simulation=False
         chemin_racine: chemin racine pour détection arrêt d'urgence
+        offre_precedente_id: id de la ligne remplacée par cet envoi, si c'est
+            une escalade ou un rejeu (lot L7) — voir `journal.OffreJournal.offre_precedente_id`
 
     Raises:
         GuardrailViolation: si un garde-fou échoue (aucune mutation)
@@ -184,6 +196,7 @@ def envoyer_offre_proposal(
             mode_simulation=mode_simulation,
             decote_groupe=False,
             taux_change_horodatage=contexte.taux_change_timestamp,
+            offre_precedente_id=offre_precedente_id,
         )
     else:  # PropositionGroupe
         for annonce in proposition.annonces:
@@ -204,6 +217,7 @@ def envoyer_offre_proposal(
                 mode_simulation=mode_simulation,
                 decote_groupe=proposition.decote_appliquee,
                 taux_change_horodatage=contexte.taux_change_timestamp,
+                offre_precedente_id=offre_precedente_id,
             )
 
     # === Mode réel : appel Sorare après écriture en base ===
@@ -232,8 +246,17 @@ def envoyer_offre_proposal(
             # Récupérer le sorare_id de la réponse
             if "createDirectOffer" in offre_creee:
                 payload = offre_creee["createDirectOffer"]
-                if "tokenOffer" in payload:
-                    sorare_id = payload["tokenOffer"].get("id")
+
+                # Bug réel trouvé en conditions réelles (lot L7, 2026-09-21,
+                # voir MESURES.md) : `payload["tokenOffer"]` peut être présent
+                # mais valoir `None` (GraphQL renvoie la clé avec une valeur
+                # nulle quand la mutation a des erreurs) — appeler `.get()`
+                # dessus plantait *avant* que les erreurs ci-dessous ne
+                # soient jamais journalisées, masquant la vraie cause de
+                # l'échec derrière un message générique.
+                token_offer = payload.get("tokenOffer")
+                if token_offer:
+                    sorare_id = token_offer.get("id")
                     if sorare_id:
                         # La ligne a déjà été enregistrée avec sorare_id=None
                         # Mettre à jour avec le vrai ID
@@ -263,7 +286,7 @@ def envoyer_offre_proposal(
                                 sorare_id,
                             )
 
-                if "errors" in payload and payload["errors"]:
+                if payload.get("errors"):
                     logger.error("Erreurs createDirectOffer : %s", payload["errors"])
 
         except Exception as exc:

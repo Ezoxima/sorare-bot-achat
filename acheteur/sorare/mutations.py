@@ -14,6 +14,13 @@ from acheteur.sorare.client import SorareClient
 
 # === Mutations ===
 
+# `... on EthereumBankTransferAuthorizationRequest { ... }` ajouté lot L7
+# (2026-09-21) : les champs propres à ce type sont nécessaires pour
+# construire le message à signer (voir `paiement/eth_signature.py`) — sans
+# eux, seul le `__typename` était visible, insuffisant pour signer quoi que
+# ce soit. Vérifié contre l'API réelle (voir MESURES.md) : les noms de
+# champs correspondent exactement au SDL local
+# (schema/sorare_schema.graphql:9921).
 PREPARE_OFFER_MUTATION = """
 mutation PrepareOffer($input: prepareOfferInput!) {
   prepareOffer(input: $input) {
@@ -24,6 +31,23 @@ mutation PrepareOffer($input: prepareOfferInput!) {
       status
       request {
         __typename
+        ... on EthereumBankTransferAuthorizationRequest {
+          contractAddress
+          senderAddress
+          receiverAddress
+          amount
+          feeAmount
+          deadline
+          salt
+          proxyAddress
+        }
+        ... on MangopayWalletTransferAuthorizationRequest {
+          amount
+          currency
+          mangopayWalletId
+          nonce
+          operationHash
+        }
       }
     }
     errors {
@@ -48,6 +72,24 @@ mutation CreateDirectOffer($input: createDirectOfferInput!) {
           slug
         }
       }
+    }
+    errors {
+      code
+      message
+      path
+    }
+  }
+}
+"""
+
+
+CANCEL_OFFER_MUTATION = """
+mutation CancelOffer($input: cancelOfferInput!) {
+  cancelOffer(input: $input) {
+    clientMutationId
+    tokenOffer {
+      id
+      status
     }
     errors {
       code
@@ -92,3 +134,27 @@ def creer_offre_directe_sorare(
         réponse brute ({"createDirectOffer": {...}} ou erreur)
     """
     return client.execute(CREATE_DIRECT_OFFER_MUTATION, variables={"input": input_data})
+
+
+# NON VÉRIFIÉE contre l'API réelle (voir MESURES.md) : `cancelOfferInput`
+# n'exige que `blockchainId` (schema/sorare_schema.graphql:34505), le champ
+# `TokenOffer.blockchainId` distinct de `id` — à confirmer avant tout usage
+# en L7 réel (une annulation avec le mauvais identifiant échouerait, ce qui
+# est un échec sûr : rien n'est débité par une annulation, voir CLAUDE.md).
+def annuler_offre_sorare(client: SorareClient, blockchain_id: str) -> dict[str, Any]:
+    """Appelle cancelOffer pour annuler une offre encore ouverte (lot L7 —
+    veille défensive, PLAN.md § « On n'annule jamais pour reposter plus
+    haut »).
+
+    Args:
+        client: client GraphQL Sorare
+        blockchain_id: `TokenOffer.blockchainId` de l'offre à annuler (PAS
+            son `id` — deux champs distincts côté Sorare)
+
+    Returns:
+        réponse brute ({"cancelOffer": {...}})
+    """
+    return client.execute(
+        CANCEL_OFFER_MUTATION,
+        variables={"input": {"blockchainId": blockchain_id}},
+    )

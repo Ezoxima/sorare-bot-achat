@@ -286,6 +286,40 @@ class TestDepuisReponseSorare:
         assert offre.joueurs_slugs == ("messi",)
         assert offre.montant_valeur == 700
         assert offre.montant_devise == "EUR"
+        # blockchainId/counteredOffer absents du fixture : valeurs par défaut,
+        # pas de KeyError sur un champ optionnel manquant (lot L7).
+        assert offre.blockchain_id is None
+        assert offre.contre_offre_montant is None
+
+    def test_parse_blockchain_id_et_contre_offre(self):
+        """Lot L7 : `blockchainId` (annulation) et `counteredOffer`
+        (contre-offre) ajoutés à `OFFRES_ENVOYEES_QUERY` — NON VÉRIFIÉ contre
+        l'API réelle (voir requetes.py, MESURES.md)."""
+        noeuds = [
+            {
+                "id": "off-1",
+                "status": "OPENED",
+                "blockchainId": "0xabc123",
+                "rejectionReason": None,
+                "createdAt": "2026-09-20T12:00:00+00:00",
+                "settlementCurrencies": ["EUR"],
+                "receiver": {"slug": "alice"},
+                "senderSide": {"amounts": {"eurCents": 700, "wei": "0"}},
+                "receiverSide": {
+                    "anyCards": [{"assetId": "card-1", "anyPlayer": {"slug": "messi"}}]
+                },
+                "counteredOffer": {
+                    "id": "off-2",
+                    "senderSide": {"amounts": {"eurCents": None, "wei": None}},
+                    "receiverSide": {"amounts": {"eurCents": 650, "wei": None}},
+                },
+            }
+        ]
+        offres = depuis_reponse_sorare(noeuds)
+        assert len(offres) == 1
+        offre = offres[0]
+        assert offre.blockchain_id == "0xabc123"
+        assert offre.contre_offre_montant == 650
 
     def test_devise_de_reglement_non_geree_est_ignoree(self):
         noeuds = [
@@ -358,3 +392,71 @@ class TestReconcilierIdempotent:
         ligne = session.query(OffreJournal).one()
         assert ligne.sorare_id == "off-close-1"
         assert ligne.etat == EtatOffre.REFUSEE
+
+
+class TestReconcilierMetAJourLesLignesAppariees:
+    """Lot L7 : sans cette mise à jour, une ligne appariée reste ENVOYEE pour
+    toujours dans le journal local même si Sorare l'a refusée/acceptée/
+    annulée/expirée — la machine à états (`negociation.etats`) n'aurait
+    jamais rien de réel sur quoi réagir."""
+
+    def test_ligne_envoyee_devient_refusee_avec_son_motif(self, session: Session):
+        ligne = enregistrer_ligne(
+            session,
+            joueur_slug="messi",
+            vendeur_slug="alice",
+            prix_demande_valeur=1000,
+            prix_demande_devise=Devise.EUR,
+            montant_offre_valeur=700,
+            montant_offre_devise=Devise.EUR,
+            reference_prix_valeur=900,
+            reference_fenetre_jours=7,
+            reference_nb_ventes=3,
+            palier=70,
+            date_pose_annonce=BASE,
+            horloge_maintenant=BASE,
+            mode_simulation=False,
+            sorare_id="off-1",
+        )
+        noeud = _noeud_offre_close("off-1", statut="rejected")
+        noeud["rejectionReason"] = "OFFER_TOO_LOW"
+        client = _ClientFactice([noeud])
+        horloge = HorlogeFigee(BASE)
+
+        rapport = reconcilier(session, client, horloge)
+
+        assert len(rapport.appariees) == 1
+        assert ligne.etat == EtatOffre.REFUSEE
+        assert ligne.motif_refus == MotifRefus.OFFRE_TROP_BASSE
+        # La référence figée au moment de l'envoi ne bouge jamais (CLAUDE.md).
+        assert ligne.reference_prix_valeur == 900
+
+    def test_toujours_ouverte_cote_sorare_ne_touche_pas_maj_le(self, session: Session):
+        """Pas de sur-écriture si l'état observé n'a pas changé depuis le
+        dernier passage — évite un `maj_le` qui bouge sans raison."""
+        ligne = enregistrer_ligne(
+            session,
+            joueur_slug="messi",
+            vendeur_slug="alice",
+            prix_demande_valeur=1000,
+            prix_demande_devise=Devise.EUR,
+            montant_offre_valeur=700,
+            montant_offre_devise=Devise.EUR,
+            reference_prix_valeur=900,
+            reference_fenetre_jours=7,
+            reference_nb_ventes=3,
+            palier=70,
+            date_pose_annonce=BASE,
+            horloge_maintenant=BASE,
+            mode_simulation=False,
+            sorare_id="off-1",
+        )
+        assert ligne.etat == EtatOffre.ENVOYEE
+        client = _ClientFactice([_noeud_offre_close("off-1", statut="opened")])
+        horloge = HorlogeFigee(BASE + timedelta(hours=1))
+
+        rapport = reconcilier(session, client, horloge)
+
+        assert len(rapport.appariees) == 1
+        assert ligne.etat == EtatOffre.ENVOYEE
+        assert ligne.maj_le == BASE

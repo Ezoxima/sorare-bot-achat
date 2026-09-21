@@ -14,15 +14,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from acheteur.cli.premiere_offre_reelle import (
-    _offres_ouvertes_reelles,
-    _rarity_brute,
+    _offres_ouvertes_par_vendeur_reelles,
     _soldes_reels,
     trouver_meilleure_candidate,
 )
 from acheteur.core.db import Base
 from acheteur.core.horloge import HorlogeFigee
 from acheteur.marche.devises import Devise, Montant
-from acheteur.marche.traduction import rarete_depuis_sorare
+from acheteur.marche.traduction import rarete_depuis_sorare, rarity_brute_depuis_annonce
 from acheteur.marche.types import Annonce, Joueur
 from acheteur.negociation.journal import EtatOffre, OffreJournal
 
@@ -30,8 +29,9 @@ BASE = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
 
 
 def test_rarity_brute_fait_l_aller_retour_avec_rarete_depuis_sorare():
-    """`_rarity_brute` doit reconstruire exactement la valeur d'enum Sorare
-    dont `annonce_depuis_noeud_marche` était parti (voir traduction.py)."""
+    """`rarity_brute_depuis_annonce` doit reconstruire exactement la valeur
+    d'enum Sorare dont `annonce_depuis_noeud_marche` était parti (voir
+    traduction.py)."""
     for brute in ("common", "limited", "rare", "super_rare"):
         joueur = Joueur(slug="x", nom="X", rareté=rarete_depuis_sorare(brute))
         annonce = Annonce(
@@ -43,7 +43,7 @@ def test_rarity_brute_fait_l_aller_retour_avec_rarete_depuis_sorare():
             date_pose=BASE,
             asset_id="asset-x",
         )
-        assert _rarity_brute(annonce) == brute
+        assert rarity_brute_depuis_annonce(annonce) == brute
 
 
 class TestSoldesReels:
@@ -74,7 +74,13 @@ def session():
     s.close()
 
 
-class TestOffresOuvertesReelles:
+class TestOffresOuvertesParVendeurReelles:
+    """Ne compte que par vendeur (règle 7, anti-démarchage) — jamais de
+    montant par devise : `soldes_par_devise` (Sorare) a déjà déduit les
+    offres réelles ouvertes, les recompter ici doublerait la déduction
+    (constaté contre le compte réel, 2026-09-21, signalé par l'utilisateur ;
+    voir DECISIONS.md/MESURES.md)."""
+
     def test_ignore_les_lignes_simulees(self, session):
         session.add(
             OffreJournal(
@@ -102,9 +108,8 @@ class TestOffresOuvertesReelles:
         )
         session.flush()
 
-        par_devise, par_vendeur = _offres_ouvertes_reelles(session)
+        par_vendeur = _offres_ouvertes_par_vendeur_reelles(session)
 
-        assert par_devise == {Devise.EUR: 700}
         assert par_vendeur == {"bob": 1}
 
 
@@ -150,6 +155,23 @@ def _noeud_marche(joueur_slug: str, eur_cents: int, vendeur_slug: str = "vendeur
     }
 
 
+def _noeud_marche_eth(joueur_slug: str, wei: int, vendeur_slug: str = "vendeur1") -> dict:
+    noeud = _noeud_marche(joueur_slug, eur_cents=0, vendeur_slug=vendeur_slug)
+    noeud["receiverSide"]["amounts"] = {"eurCents": None, "wei": str(wei)}
+    return noeud
+
+
+def _prix_eth(*wei_ventes: int) -> dict:
+    return {
+        "tokens": {
+            "tokenPrices": [
+                {"amounts": {"eurCents": None, "wei": str(v)}, "date": "2026-09-16T10:00:00+00:00"}
+                for v in wei_ventes
+            ]
+        }
+    }
+
+
 def _prix(*eur_cents_ventes: int) -> dict:
     return {
         "tokens": {
@@ -164,14 +186,16 @@ def _prix(*eur_cents_ventes: int) -> dict:
 class TestTrouverMeilleureCandidate:
     def test_saute_la_moins_chere_sans_reference_suffisante(self):
         """La moins chère (haaland, 1.00€) n'a que 2 ventes récentes (< 3
-        exigées) : on passe à la suivante (messi, 2.00€) qui en a 3."""
+        exigées) : on passe à la suivante (messi, 1.50€, une bonne affaire
+        par rapport à sa référence de 1.90€ NETTE des 5% de taxe de revente
+        Sorare — voir decision/selecteur.py) qui en a 3."""
         client = _ClientFactice(
             marche={
                 "tokens": {
                     "liveSingleSaleOffers": {
                         "nodes": [
                             _noeud_marche("haaland", 100),
-                            _noeud_marche("messi", 200),
+                            _noeud_marche("messi", 150),
                         ]
                     }
                 }
@@ -189,6 +213,58 @@ class TestTrouverMeilleureCandidate:
         annonce, reference = resultat
         assert annonce.joueur.slug == "messi"
         assert reference.valeur == 190  # médiane de 180/190/200
+
+    def test_ignore_une_candidate_dont_le_prix_est_au_dessus_de_sa_reference(self):
+        """Régression réelle (2026-09-21, voir DECISIONS.md) : une annonce
+        avec une référence valide mais un prix demandé au-dessus de cette
+        référence (donc pas une bonne affaire) doit être ignorée, pas
+        achetée sous prétexte qu'elle a >= 3 ventes récentes."""
+        client = _ClientFactice(
+            marche={
+                "tokens": {
+                    "liveSingleSaleOffers": {
+                        "nodes": [_noeud_marche("gragera", 40)],  # 0.40€
+                    }
+                }
+            },
+            prix_par_joueur={
+                "gragera": _prix(20, 22, 24),  # référence médiane 0.22€ — 0.40€ est 182% de ça
+            },
+        )
+        horloge = HorlogeFigee(BASE)
+
+        assert trouver_meilleure_candidate(client, horloge) is None
+
+    def test_filtre_devise_ignore_les_annonces_d_une_autre_devise(self):
+        """Régression (constaté en session réelle, 2026-09-21) : sans filtre,
+        une annonce EUR (quelques centaines de centimes) passe systématiquement
+        avant une annonce ETH (10^14+ wei) au tri par valeur brute — aucune
+        candidate ETH n'est jamais retenue alors que c'est le seul rail
+        signable actuellement (voir DECISIONS.md). `devise=Devise.ETH` doit
+        écarter la candidate EUR moins chère en valeur brute."""
+        client = _ClientFactice(
+            marche={
+                "tokens": {
+                    "liveSingleSaleOffers": {
+                        "nodes": [
+                            _noeud_marche("haaland", 100),  # 1.00 EUR, moins cher en brut
+                            _noeud_marche_eth("mbappe", 5_400_000_000_000_000),  # 0.0054 ETH
+                        ]
+                    }
+                }
+            },
+            prix_par_joueur={
+                "haaland": _prix(90, 95, 100),
+                "mbappe": _prix_eth(6_000_000_000_000_000, 6_500_000_000_000_000, 7_000_000_000_000_000),
+            },
+        )
+        horloge = HorlogeFigee(BASE)
+
+        resultat = trouver_meilleure_candidate(client, horloge, devise=Devise.ETH)
+
+        assert resultat is not None
+        annonce, _ = resultat
+        assert annonce.joueur.slug == "mbappe"
 
     def test_aucune_candidate_si_rien_n_a_de_reference(self):
         client = _ClientFactice(

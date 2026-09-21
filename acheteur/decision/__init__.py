@@ -11,10 +11,23 @@ from acheteur.decision.proposition import (
     proposer_groupe,
     proposer_simple,
 )
-from acheteur.decision.selecteur import est_bonne_affaire, selectionner_annonces
+from acheteur.decision.selecteur import (
+    SOUS_VENTE_MINI_SEUIL_POURCENT_DEFAUT,
+    TAUX_TAXE_REVENTE_POURCENT,
+    est_bonne_affaire,
+    est_sous_vente_minimum,
+    prix_minimum_avant,
+    reference_nette_de_taxe,
+    selectionner_annonces,
+)
 
 __all__ = [
     "est_bonne_affaire",
+    "reference_nette_de_taxe",
+    "TAUX_TAXE_REVENTE_POURCENT",
+    "est_sous_vente_minimum",
+    "prix_minimum_avant",
+    "SOUS_VENTE_MINI_SEUIL_POURCENT_DEFAUT",
     "selectionner_annonces",
     "Palier",
     "montant_offre",

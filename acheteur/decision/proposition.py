@@ -5,7 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from acheteur.decision.paliers import Palier, montant_offre
+from acheteur.marche.devises import Devise, arrondir_wei_a_la_maille
 from acheteur.marche.types import Annonce
+
+
+def _arrondir_si_eth(montant: int, devise: Devise) -> int:
+    """Un montant en ETH doit tomber sur la maille du carnet Sorare (0.0001
+    ETH, ~20-25 centimes — signalé par l'utilisateur, 2026-09-21) : sans ça,
+    l'offre calculée n'a aucune chance d'être un montant réellement
+    négociable. Toujours vers le bas (PLAN.md), jamais l'inverse — voir
+    `marche.devises.arrondir_wei_a_la_maille`."""
+    return arrondir_wei_a_la_maille(montant) if devise == Devise.ETH else montant
 
 
 @dataclass(frozen=True)
@@ -47,7 +57,9 @@ def proposer_simple(
     Returns:
         proposition prête à être examinée
     """
-    montant = montant_offre(annonce.prix_demande.valeur, palier)
+    montant = _arrondir_si_eth(
+        montant_offre(annonce.prix_demande.valeur, palier), annonce.prix_demande.devise
+    )
     return PropositionSimple(
         annonce=annonce,
         reference_prix_valeur=reference_valeur,
@@ -108,10 +120,11 @@ def proposer_groupe(
 
         # Décote 65% seulement au premier palier
         if palier == Palier.PREMIER and len(annonces) > 1:
-            montants[annonce.joueur.slug] = (annonce.prix_demande.valeur * 65) // 100
+            montant = (annonce.prix_demande.valeur * 65) // 100
             decote = True
         else:
-            montants[annonce.joueur.slug] = montant_offre(annonce.prix_demande.valeur, palier)
+            montant = montant_offre(annonce.prix_demande.valeur, palier)
+        montants[annonce.joueur.slug] = _arrondir_si_eth(montant, annonce.prix_demande.devise)
 
     return PropositionGroupe(
         annonces=tuple(annonces),

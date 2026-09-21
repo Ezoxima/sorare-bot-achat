@@ -13,3 +13,4 @@ ARRET_URGENCE
 .pytest_cache/
 *.egg-info/
 .ruff_cache/
+rapport.txt

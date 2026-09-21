@@ -22,7 +22,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum, StrEnum
 
-from sqlalchemy import CheckConstraint, Index, String, Text, text
+from sqlalchemy import CheckConstraint, ForeignKey, Index, String, Text, text
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -134,6 +134,16 @@ class OffreJournal(Base):
     # découverte sur Sorare), jamais par une décision du bot.
     import_automatique: Mapped[bool] = mapped_column(nullable=False, default=False)
 
+    # Chaîne d'escalade (lot L7, PLAN.md § « La machine à états ») : renseigné
+    # quand cette ligne remplace une ligne close (refusée/expirée) sur le même
+    # (joueur, vendeur) à un palier supérieur ou égal. Permet de retrouver
+    # tout l'historique d'une négociation et de compter les ré-essais déjà
+    # consommés (PLAN.md : « un seul ré-essai » sur expiration) sans dépendre
+    # d'une colonne de comptage séparée qui pourrait diverger du réel.
+    offre_precedente_id: Mapped[int | None] = mapped_column(
+        ForeignKey("offres_journal.id"), nullable=True
+    )
+
     cree_le: Mapped[datetime] = mapped_column(nullable=False)
     maj_le: Mapped[datetime] = mapped_column(nullable=False)
 
@@ -183,6 +193,7 @@ def enregistrer_ligne(
     decote_groupe: bool = False,
     taux_change_horodatage: datetime | None = None,
     sorare_id: str | None = None,
+    offre_precedente_id: int | None = None,
 ) -> OffreJournal:
     """Écrit une ligne *décidée par le bot* (référence, palier connus).
 
@@ -208,6 +219,7 @@ def enregistrer_ligne(
         etat=EtatOffre.SIMULEE if mode_simulation else EtatOffre.ENVOYEE,
         mode_simulation=mode_simulation,
         import_automatique=False,
+        offre_precedente_id=offre_precedente_id,
         cree_le=horloge_maintenant,
         maj_le=horloge_maintenant,
     )
@@ -271,3 +283,22 @@ def lignes_ouvertes(
     if mode_simulation is not None:
         requete = requete.filter(OffreJournal.mode_simulation == mode_simulation)
     return list(requete.order_by(OffreJournal.id).all())
+
+
+def reessai_expiration_deja_fait(session: Session, ligne: OffreJournal) -> bool:
+    """Dit si `ligne` est elle-même née d'un ré-essai sur expiration — donc
+    si, en cas de nouvelle expiration, PLAN.md interdit d'en retenter un
+    second (« un seul ré-essai »).
+
+    Ne regarde que le prédécesseur immédiat (`offre_precedente_id`), pas
+    toute la chaîne : le compteur porte sur *cette* expiration précise, pas
+    sur la durée de vie entière d'une négociation qui aurait par ailleurs
+    escaladé sur refus entre-temps (une ligne née d'une escalade-sur-refus
+    n'a jamais consommé son propre droit au ré-essai sur expiration).
+    """
+    if ligne.offre_precedente_id is None:
+        return False
+    precedente = session.get(OffreJournal, ligne.offre_precedente_id)
+    if precedente is None:
+        return False
+    return precedente.etat == EtatOffre.EXPIREE and precedente.motif_refus is None

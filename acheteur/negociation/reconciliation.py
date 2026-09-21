@@ -68,6 +68,13 @@ class OffreSorareObservee:
     etat_brut: str
     motif_refus_brut: str | None
     reponse_brute: dict
+    # `TokenOffer.blockchainId` — requis par `cancelOffer` (lot L7), distinct
+    # de `sorare_id` (`TokenOffer.id`). Absent tant qu'une offre n'a pas
+    # encore été confirmée on-chain.
+    blockchain_id: str | None = None
+    # Montant de la contre-offre du vendeur (`TokenOffer.counteredOffer`),
+    # même devise que `montant_devise`. `None` si aucune contre-offre.
+    contre_offre_montant: int | None = None
 
 
 @dataclass
@@ -181,8 +188,10 @@ def etat_depuis_sorare(etat_brut: str) -> EtatOffre:
     `ENVOYEE` — y compris une offre réellement rejetée, qui restait alors
     « ouverte » aux yeux du journal (voir MESURES.md).
 
-    Ne couvre que ce dont la réconciliation a besoin en lot L2 (import) —
-    la machine à états complète (motif par motif) arrive au lot L7.
+    `EXPIRED` (lot L7, PLAN.md § « Expiration silencieuse ») : NON VÉRIFIÉE
+    contre l'API réelle — jamais observée à ce jour (voir MESURES.md). Une
+    valeur de statut ni reconnue ici ni ci-dessus retombe sur `ENVOYEE`
+    (offre encore ouverte aux yeux du journal) plutôt que de deviner.
     """
     etat_normalise = etat_brut.upper()
     if etat_normalise == "ACCEPTED":
@@ -191,6 +200,8 @@ def etat_depuis_sorare(etat_brut: str) -> EtatOffre:
         return EtatOffre.REFUSEE
     if etat_normalise == "CANCELLED":
         return EtatOffre.ANNULEE
+    if etat_normalise == "EXPIRED":
+        return EtatOffre.EXPIREE
     return EtatOffre.ENVOYEE
 
 
@@ -224,6 +235,18 @@ def depuis_reponse_sorare(noeuds: list[dict[str, Any]]) -> list[OffreSorareObser
             )
         )
 
+        contre_offre = noeud.get("counteredOffer") or None
+        contre_offre_montant = None
+        if contre_offre is not None:
+            for cote in ("senderSide", "receiverSide"):
+                montants_cote = (contre_offre.get(cote) or {}).get("amounts") or {}
+                valeur = montants_cote.get("eurCents") if devise == Devise.EUR else montants_cote.get(
+                    "wei"
+                )
+                if valeur is not None:
+                    contre_offre_montant = int(valeur)
+                    break
+
         offres.append(
             OffreSorareObservee(
                 sorare_id=noeud["id"],
@@ -235,6 +258,8 @@ def depuis_reponse_sorare(noeuds: list[dict[str, Any]]) -> list[OffreSorareObser
                 etat_brut=noeud["status"],
                 motif_refus_brut=noeud.get("rejectionReason"),
                 reponse_brute=noeud,
+                blockchain_id=noeud.get("blockchainId"),
+                contre_offre_montant=contre_offre_montant,
             )
         )
     return offres
@@ -291,5 +316,27 @@ def reconcilier(session: Session, client: SorareClient, horloge: Horloge) -> Rap
             creee_le=offre.creee_le,
             horloge_maintenant=maintenant,
         )
+
+    # Lot L7 : une ligne appariée reste un simple reflet de ce qu'on a nous-
+    # même décidé d'envoyer (état ENVOYEE figé) tant que personne ne la met à
+    # jour avec ce que Sorare observe *maintenant* — sans quoi la machine à
+    # états (lot L7) n'aurait jamais de refus/acceptation/expiration sur
+    # lesquels réagir. On ne touche qu'à `etat`, `motif_refus` et
+    # `reponse_brute` : jamais à `reference_prix_valeur` ni aux autres champs
+    # figés au moment de l'envoi (CLAUDE.md — la règle qui a déjà cassé
+    # Pickdeck).
+    for ligne, offre in rapport.appariees:
+        nouvel_etat = etat_depuis_sorare(offre.etat_brut)
+        if nouvel_etat == ligne.etat:
+            continue
+        ligne.etat = nouvel_etat
+        ligne.motif_refus = (
+            motif_refus_depuis_sorare(offre.motif_refus_brut)
+            if nouvel_etat == EtatOffre.REFUSEE
+            else None
+        )
+        ligne.reponse_brute = json.dumps(offre.reponse_brute, ensure_ascii=False)
+        ligne.maj_le = maintenant
+    session.flush()
 
     return rapport

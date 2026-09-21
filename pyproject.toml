@@ -9,6 +9,8 @@ dependencies = [
     "sqlalchemy>=2.0",
     "keyring>=25.0",
     "bcrypt>=4.1",
+    "eth-account>=0.14",
+    "ecdsa>=0.19",
 ]
 
 [project.optional-dependencies]
