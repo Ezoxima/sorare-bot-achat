@@ -117,12 +117,16 @@ d'énumération marche donc bien côté Python, pas seulement côté Apps
 Script. Pas encore mesurés séparément : nombre de clubs, appels réseau,
 temps d'exécution (voir MESURES.md pour le détail de ce qui manque).
 
-**Branché (2026-09-22) : `maj_liste_liquidite.py` mesure maintenant TOUT le
-référentiel**, plus l'échantillon du marché — voir DECISIONS.md. Le
-diagnostic initial de ce TODO (liste liquide biaisée vers les cartes bon
-marché) devrait être corrigé par ce câblage, **mais pas encore vérifié
-contre un run réel** (coût attendu ~10 minutes, ~530 appels — voir le
-docstring de `maj_liste_liquidite.py`). À confirmer au prochain
-`python -m acheteur.cli.maj_liste_liquidite` réel : la répartition par
-rareté de la nouvelle liste liquide, et si les propositions générées par
-`proposer_periodique.py` montrent enfin des joueurs plus chers.
+**Branché et vérifié contre le réel (2026-09-22, voir MESURES.md)** :
+`maj_liste_liquidite.py` mesure maintenant tout le référentiel — l'utilisateur
+a lancé le run complet, **2 942 couples liquides retenus sur 106 356
+mesurés**, contre 19 avec l'ancien pipeline (155x plus). Le diagnostic
+initial de ce TODO (échantillonnage biaisé vers les cartes bon marché) est
+corrigé côté construction de la liste.
+
+**Reste à vérifier : l'effet réel sur les propositions.** Personne n'a
+encore relancé `proposer_periodique.py` depuis ce nouveau run de
+`maj_liste_liquidite.py` — il faut le faire pour confirmer que la
+répartition par rareté/prix des propositions a vraiment changé (le but
+recherché depuis le début de ce fil), pas seulement le nombre de couples
+liquides en base.

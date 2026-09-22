@@ -532,6 +532,23 @@ réseau, le temps d'exécution (l'utilisateur n'a collé que la dernière
 ligne de sortie). À demander au prochain run si ces chiffres deviennent
 utiles (ex. pour dimensionner `TAILLE_LOT_CLUBS_JOUEURS_DEFAUT`).
 
+## 2026-09-22 — `maj_liste_liquidite.py` câblé sur le référentiel : run complet réel
+
+L'utilisateur a lancé `python -m acheteur.cli.maj_liste_liquidite` (sans
+limite) après le test à `--limite-joueurs 200` (15/800 couples liquides,
+entrée précédente). **2 942 couples liquides retenus sur 106 356 mesurés**
+(26 589 joueurs × 2 raretés × 2 saisons) — cohérent avec l'extrapolation
+faite à partir de l'échantillon de 200 joueurs (~2 000 attendus, 2 942
+observés, même ordre de grandeur). Contre les 19 couples de l'ancien
+pipeline (échantillonnage par fraîcheur d'annonces, 2026-09-22, avant ce
+lot) : **155 fois plus de couples liquides retenus.**
+
+Temps d'exécution et nombre exact d'appels réseau non chronométrés par
+l'utilisateur (collé seulement la fin de la sortie). Reste à observer :
+l'effet réel sur `cli/proposer_periodique.py` (répartition par rareté et
+par prix des propositions générées à partir de cette nouvelle liste) —
+c'était le but recherché depuis le début du fil (voir TODO.md).
+
 ## Prochaines mesures attendues, dans l'ordre
 
 1. **Etat du compte (référence du 2026-09-20)** →
