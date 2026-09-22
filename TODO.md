@@ -37,3 +37,17 @@ avant le filtre de liquidité, ni si le filtre de liquidité lui-même
 (2026-09-22) — comprendre d'abord le mécanisme en détail avant de choisir
 un correctif, plutôt que d'empiler un réglage de plus sur une hypothèse non
 vérifiée (cohérent avec CLAUDE.md — modules touchant à la décision d'achat).
+
+**Élément chiffré, apporté par l'utilisateur après coup** : son ancien
+script Apps Script (`sealing-sorare-apps-script`) retrouvait « plusieurs
+milliers de couples » — ici, `--premieres 500` (défaut) ne récupère que 500
+annonces brutes du marché entier, réduites à 273 couples distincts après
+traduction/dédoublonnage, sur un marché mesuré à **543 496 annonces au
+total** (MESURES.md, 2026-09-22). L'échantillon actuel couvre environ
+0,1 % du marché — l'Apps Script balayait très probablement le marché
+autrement (liste de joueurs complète, pagination beaucoup plus profonde,
+ou référentiel externe) plutôt qu'un tirage des 500 annonces les plus
+fraîches. Renforce l'hypothèse (1) ci-dessus sans encore la confirmer
+formellement (pas mesuré la répartition par rareté dans l'échantillon
+brut) — la méthode Apps Script exacte reste à comparer point par point
+avec `maj_liste_liquidite.py` avant de corriger.
