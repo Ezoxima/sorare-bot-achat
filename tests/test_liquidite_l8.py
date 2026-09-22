@@ -60,7 +60,7 @@ class TestEstLiquide:
         assert est_liquide(liquidite)
 
     def test_echoue_sur_n30(self):
-        liquidite = Liquidite(n30=14, n7=3, semaines_actives=4)
+        liquidite = Liquidite(n30=9, n7=3, semaines_actives=4)
         assert not est_liquide(liquidite)
 
     def test_echoue_sur_n7(self):

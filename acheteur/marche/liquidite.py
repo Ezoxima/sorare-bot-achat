@@ -3,11 +3,11 @@ AVANT tout calcul de référence de prix ou toute décision d'achat.
 
 Inspiré de `sealing-sorare-apps-script/04 - bonnes affaires liste.gs`
 (`CRITERES_BA`) : un joueur dont les cartes ne se revendent pas n'a pas de
-valeur de négociation, quel que soit son prix demandé. Les seuils par
-défaut ont été re-choisis par l'utilisateur (2026-09-22, voir DECISIONS.md)
-pour viser une vente tous les 2 jours en moyenne (30 / 15 = 2, cohérent
-avec `ventes7_mini` resté à 3 plutôt que le 3,5 strictement proportionnel —
-choix explicite de l'utilisateur, pas une approximation).
+valeur de négociation, quel que soit son prix demandé. Seuils choisis par
+l'utilisateur : 15 ventes/30j au départ (2026-09-22, voir DECISIONS.md),
+assoupli à 10 ventes/30j le même jour pour laisser passer des joueurs plus
+chers, structurellement moins fréquemment revendus (voir DECISIONS.md,
+entrée du même jour) — `ventes_7_mini` reste à 3, choix indépendant.
 
 Fonctions pures : aucun réseau, aucune base — comme le reste de
 `acheteur.marche` et `acheteur.decision`.
@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 
 from acheteur.marche.types import Vente
 
-VENTES_30_MINI_DEFAUT = 15
+VENTES_30_MINI_DEFAUT = 10
 VENTES_7_MINI_DEFAUT = 3
 SEMAINES_MINI_DEFAUT = 4
 

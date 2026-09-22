@@ -1273,3 +1273,98 @@ pas un seuil codé, qui conditionne l'ouverture de L11.
 
 11 tests ajoutés (`tests/test_mesure_acceptation_l10.py`). 279 tests
 passent.
+
+## 2026-09-22 — Lot L9 (partie manquante) : tâche planifiée + mail + approbation asynchrone
+
+Le lot L9 du tableau PLAN.md (« Tâche planifiée toutes les 15 min + mail +
+boucle complète phase 1 ») n'était que partiellement fait : seul le « scan »
+(`cli/scan_liste_liquidite.py`) existait, en pur affichage. Il manquait la
+persistance des propositions et l'approbation asynchrone décrites au §
+« Le mode propose, tu valides ». Complété par deux scripts + un module de
+persistance, sans toucher à `scan_marche.py`/`scan_liste_liquidite.py`
+(réutilisés tels quels).
+
+**Fichier JSON horodaté, pas la base.** `acheteur/approbation/fichier_propositions.py`
+sérialise les `PropositionSimple`/`PropositionGroupe` dans `propositions/propositions_<horodatage>.json`
+(dossier gitignoré, même raison que `sondes/resultats/`). Comme pour
+`scan_marche.py`, écrire une ligne `OffreJournal` avant approbation
+occuperait l'index unique (joueur, vendeur) et bloquerait un futur essai
+réel — donc aucune écriture en base tant que rien n'est approuvé.
+
+**`cli/proposer_periodique.py`** : reprend intégralement le pipeline de
+`scan_liste_liquidite.py` (import direct des fonctions internes, aucune
+duplication), mais persiste le résultat et envoie un mail si SMTP est
+configuré. Toujours en lecture seule côté Sorare/base. C'est ce script qui
+est destiné à la tâche planifiée toutes les 15 min — la commande `schtasks`
+est documentée dans son docstring, mais **la tâche n'a pas été enregistrée
+dans cette session** : l'enregistrer est une action système persistante
+(hors du dépôt), laissée à l'utilisateur.
+
+**Mail optionnel, jamais bloquant.** `acheteur/approbation/mail.py` (SMTP
+standard, `smtplib`) — si `smtp_host`/`smtp_destinataire` sont vides dans
+`.env`, `proposer_periodique.py` écrit quand même le fichier et le signale
+en sortie : le fichier reste la source de vérité, le mail n'est qu'une
+notification (PLAN.md ne dit pas que le mail est requis, seulement que
+« la validation doit être asynchrone »). Mot de passe SMTP jamais
+journalisé : en cas d'échec d'envoi, seuls host/port et le type
+d'exception sont loggués, jamais le message brut du serveur SMTP.
+
+**`cli/approuver_propositions.py` : retape du montant total PAR DEVISE
+(pas ligne par ligne).** PLAN.md § « Le mode propose, tu valides » : « tu
+valides en une commande, ligne par ligne, et la confirmation finale te
+demande de retaper le montant total ». Choix : l'utilisateur sélectionne
+d'abord les lignes à envoyer (indices séparés par des virgules, ou
+« toutes »/« aucune »), puis retape une fois le total par devise des lignes
+sélectionnées — pas un retype par ligne (ce que fait `cycle_negociation.py`,
+qui lui ne traite jamais plus d'une escalade à la fois). La vérification
+mécanique de la barrière (règle 9) reçoit, elle, le montant de CHAQUE
+proposition individuellement (`montant_retape=montant` par appel) — c'est
+un garde-fou de cohérence interne, pas une resaisie humaine ; la confirmation
+humaine, elle, a déjà eu lieu une fois sur l'agrégat.
+
+**Chaque annonce est revérifiée en direct juste avant son envoi**
+(`_proposition_toujours_valide`, même principe que
+`cycle_negociation._rafraichir_annonce`) : le fichier de propositions peut
+être vieux de plusieurs minutes à plusieurs heures (tu n'es pas devant
+l'écran, PLAN.md) — une annonce disparue ou dont le prix demandé a changé
+depuis le scan est écartée avec un message explicite, jamais envoyée sur une
+base potentiellement obsolète. Avertissement non bloquant (pas un refus) si
+le fichier a plus de 30 minutes (`fichier_perime`, seuil injectable) : un
+signal à afficher, pas à cacher (« jamais un chiffre sans son effectif »).
+
+**Aucun envoi réel exercé dans cette session** — ces deux scripts n'ont pas
+été lancés contre le compte réel (voir MESURES.md pour ce qui reste à
+vérifier au premier run réel : format exact du mail avec un vrai serveur
+SMTP, comportement de la revérification en direct sur une vraie annonce
+disparue/repricée).
+
+Tests ajoutés : `tests/test_fichier_propositions_l9.py` (round-trip JSON),
+`tests/test_approuver_propositions_l9.py` (parsing sélection, totaux par
+devise), `tests/test_mail_l9.py` (détection de configuration, refus sans
+réseau si SMTP absent). 299 tests passent.
+
+## 2026-09-22 — Seuil de liquidité assoupli à 10 ventes/30j (était 15)
+
+Constat de l'utilisateur après premier run réel de `proposer_periodique.py`
+(liste liquide) : uniquement des joueurs à très faible valeur dans les
+propositions. Cause identifiée, pas un bug : `ventes_30_mini = 15` (lot
+« Pré-filtre liquidité », plus haut) filtre mécaniquement les cartes chères
+(peu d'exemplaires, se revendent rarement) au profit des cartes
+common/limited bon marché qui tournent vite — combiné à l'échantillonnage
+par fraîcheur de `maj_liste_liquidite.py` (pas par prix), qui favorise
+encore les mêmes cartes.
+
+**Décision de l'utilisateur : `ventes_30_mini` abaissé à 10** (au lieu de
+15, choisi le même jour plus tôt dans cette session — voir entrée « Pré-
+filtre liquidité » ci-dessus). `ventes_7_mini` (3) et `semaines_mini` (4)
+inchangés. Laisse passer des joueurs un peu moins fréquemment revendus sans
+aller jusqu'au seuil `ventes_30Mini=10` d'origine des `.gs` (qui, lui,
+n'exigeait pas les deux autres critères en même temps).
+
+**N'élimine pas le second biais** (échantillonnage par fraîcheur de
+`maj_liste_liquidite.py`, qui reste indépendant du seuil de liquidité) —
+non traité ici, signalé à l'utilisateur comme option si le résultat reste
+insuffisant après ce changement.
+
+Un seul test ajustait un cas au seuil exact (`test_liquidite_l8.py::TestEstLiquide::test_echoue_sur_n30`,
+n30=14→9 pour rester sous le nouveau défaut). 299 tests passent toujours.
