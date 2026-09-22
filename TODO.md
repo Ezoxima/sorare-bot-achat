@@ -83,3 +83,40 @@ comme l'Apps Script (`majListeBonnesAffaires()`, « à programmer une fois
 par jour ») — cohérent avec `DELAI_RAFRAICHISSEMENT_HEURES = 24` déjà en
 place côté `acheteur` (`marche/liste_liquidite.py`), qui n'a donc pas
 besoin de changer une fois le vrai correctif écrit.
+
+**Première moitié du correctif faite (2026-09-22) : le référentiel de
+joueurs existe maintenant.** L'utilisateur a fourni le code source de
+`genererListeJoueurs()` (Apps Script) : construit `LISTE_COMPLETE` (le CSV
+d'origine, collé à la main depuis `sorare_app_v2`) directement depuis l'API
+Sorare — compétitions énumérables (`leaguesOpenForGameStats`,
+`cardShardsPoolCompetitions`) → clubs de chaque compétition
+(`football.competitions(slugs:).clubs`, paginé) → joueurs actifs de chaque
+club (`football.club(slug:).anyActivePlayers`, aliasé par lots de 150
+clubs, paginé). Porté côté `acheteur` :
+
+- [acheteur/marche/referentiel_joueurs.py](acheteur/marche/referentiel_joueurs.py)
+  — persistance (même forme que `liste_liquidite.py` : remplacement complet,
+  péremption à 24h).
+- [acheteur/sorare/requetes.py](acheteur/sorare/requetes.py) — 6 nouvelles
+  requêtes (section « Référentiel de joueurs » en fin de fichier).
+- [acheteur/cli/maj_referentiel_joueurs.py](acheteur/cli/maj_referentiel_joueurs.py)
+  — orchestration, à planifier une fois par jour (commande `schtasks` dans
+  le docstring, tâche pas enregistrée dans cette session).
+
+**Pas encore fait, et c'est la partie qui change réellement le résultat** :
+brancher ce référentiel dans `maj_liste_liquidite.py` — aujourd'hui ce
+script échantillonne toujours `annonces_marche_paginees` (le flux
+d'annonces trié par fraîcheur), pas le référentiel. Tant que ce câblage
+n'est pas fait, `maj_referentiel_joueurs.py` construit une liste inutilisée
+par le reste du pipeline.
+
+**Non vérifié contre l'API réelle** (voir MESURES.md) : ni la méthode
+d'énumération (compétitions → clubs → joueurs actifs) ni son coût réel en
+appels/temps côté Python — seulement portée du comportement mesuré côté
+Apps Script par l'utilisateur. À vérifier au premier
+`python -m acheteur.cli.maj_referentiel_joueurs` réel : nombre de clubs,
+nombre de joueurs (attendu ~800 clubs / ~26 000 joueurs, valeurs Apps
+Script), et confirmer qu'aucun slug de club renvoyé par
+`clubs_des_competitions` ne fait échouer `joueurs_actifs_des_clubs_lot`
+(le SDL ne documente pas ce comportement, seul le retour d'expérience Apps
+Script — « Team(slug=...) not found » sur tout le lot — le suggère).

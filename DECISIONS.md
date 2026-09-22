@@ -1368,3 +1368,56 @@ insuffisant après ce changement.
 
 Un seul test ajustait un cas au seuil exact (`test_liquidite_l8.py::TestEstLiquide::test_echoue_sur_n30`,
 n30=14→9 pour rester sous le nouveau défaut). 299 tests passent toujours.
+
+## 2026-09-22 — Référentiel de joueurs, porté depuis `genererListeJoueurs.gs`
+
+Première moitié du correctif identifié dans TODO.md (échantillonnage biaisé
+de `maj_liste_liquidite.py`). L'utilisateur a fourni le code source de
+`genererListeJoueurs()` (Apps Script) : construit le CSV d'origine
+(`LISTE_COMPLETE`, jusqu'ici collé à la main depuis `sorare_app_v2`)
+directement depuis l'API Sorare, sans base externe. Porté quasiment tel
+quel côté `acheteur` — même méthode en quatre étapes (compétitions
+énumérables → clubs des compétitions, paginé → joueurs actifs par club,
+aliasé/paginé), même limitation assumée (~26 000 joueurs contre 36 065
+dans le CSV d'origine, compétitions mineures hors de portée d'une requête
+API unique).
+
+**Table séparée de `JoueurLiquide`, jamais de prix.**
+`marche/referentiel_joueurs.py::JoueurReferentiel` ne porte que l'identité
+(slug, nom, club, compétition domestique) — même principe que
+`liste_liquidite.py` (« cette table ne stocke jamais de référence de
+prix ») : mélanger identité et prix ferait vivre une donnée obsolète dans
+une table qui ne doit changer qu'une fois par jour.
+
+**Variables GraphQL, pas de concaténation de chaînes.** L'Apps Script
+construit ses alias avec des slugs concaténés directement dans le texte de
+la requête (échappés à la main, `slug.replace(/"/g, '\\"')`).
+`_requete_pool_joueurs_lot` (sorare/requetes.py) suit plutôt la convention
+déjà en place côté Python (`_requete_historique_prix_lot`, lot L9) : un
+slug par variable nommée (`$slug0`, `$slug1`, ...), jamais littéral dans le
+texte — élimine toute question d'échappement.
+
+**`joueurs_actifs_des_clubs_lot` ne capture pas les erreurs**,
+contrairement à `stock_vendeur`/`vitrine_vendeur` (qui traitent un slug
+inconnu comme « non mesurable »). Ici, tous les slugs de clubs viennent de
+l'API elle-même dans la même passe (jamais tapés à la main) — un échec
+serait donc systématique (bug de construction de requête), pas un cas
+individuel isolé à absorber ; il doit remonter plutôt que tronquer
+silencieusement le référentiel.
+
+**Ce qui reste à faire, volontairement pas fait ici** : brancher ce
+référentiel dans `maj_liste_liquidite.py` (aujourd'hui toujours sur
+`annonces_marche_paginees`, le flux trié par fraîcheur) — voir TODO.md.
+Construire le référentiel sans l'utiliser encore rend cette moitié du
+travail visible mais inerte, exprès : la portée demandée était « avoir la
+liste complète des joueurs », pas encore « corriger le biais de
+sélection ».
+
+**Non vérifié contre l'API réelle** (voir MESURES.md) — ni la méthode
+d'énumération, ni son coût réel en appels/temps côté Python, seulement
+portée du comportement mesuré côté Apps Script par l'utilisateur.
+
+13 tests ajoutés (`tests/test_referentiel_joueurs_l9.py`, dont deux avec un
+client GraphQL factice pour couvrir la logique de pagination sur deux
+niveaux — clubs d'une grosse compétition, joueurs d'un gros club). 312
+tests passent.

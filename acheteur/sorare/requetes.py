@@ -560,3 +560,198 @@ def vitrine_vendeur(
         "total_count": bloc.get("totalCount", 0),
         "nodes": bloc.get("nodes") or [],
     }
+
+
+# ---------------------------------------------------------------------------
+# Référentiel de joueurs (`cli/maj_referentiel_joueurs.py`, `marche/referentiel_joueurs.py`)
+#
+# Reconstruit le pool complet de joueurs actifs depuis l'API Sorare elle-même
+# (compétitions → clubs → joueurs actifs), sans dépendre d'aucune base
+# externe. Portée directement de `sealing-sorare-apps-script/genererListeJoueurs.gs`
+# (fourni par l'utilisateur, 2026-09-22, méthode mesurée par sonde avant
+# écriture côté Apps Script) — NON ENCORE VÉRIFIÉE contre l'API réelle côté
+# Python (voir MESURES.md).
+# ---------------------------------------------------------------------------
+
+# `leaguesOpenForGameStats`/`clubsReady` s'énumèrent sans argument — une
+# partie du pool de compétitions/clubs, sans coût de pagination.
+COMPETITIONS_CLUBS_ENUMERABLES_QUERY = """
+query CompetitionsClubsEnumerables {
+  football {
+    leaguesOpenForGameStats { slug }
+    clubsReady { slug }
+  }
+}
+"""
+
+
+def competitions_et_clubs_enumerables(client: SorareClient) -> tuple[list[str], list[str]]:
+    """Les compétitions et clubs qui s'énumèrent sans argument.
+
+    Returns:
+        (slugs de compétitions, slugs de clubs) — deux listes indépendantes,
+        pas encore l'union complète du pool (voir `cardshards_pool_competitions`
+        et `clubs_des_competitions` pour le reste).
+    """
+    data = client.execute(COMPETITIONS_CLUBS_ENUMERABLES_QUERY)
+    football = data["football"]
+    competitions = [c["slug"] for c in football["leaguesOpenForGameStats"]]
+    clubs = [c["slug"] for c in football["clubsReady"]]
+    return competitions, clubs
+
+
+CARD_SHARDS_POOL_COMPETITIONS_QUERY = """
+query CardShardsPoolCompetitions($rarity: Rarity!, $sport: Sport!) {
+  cardShardsPoolCompetitions(rarity: $rarity, sport: $sport) { slug }
+}
+"""
+
+
+def cardshards_pool_competitions(
+    client: SorareClient, rarete: str = "limited", sport: str = "FOOTBALL"
+) -> list[str]:
+    """Compétitions du pool de craft — souvent les mêmes que
+    `leaguesOpenForGameStats`, mais pas toujours (voir docstring Apps Script
+    d'origine)."""
+    data = client.execute(
+        CARD_SHARDS_POOL_COMPETITIONS_QUERY, variables={"rarity": rarete, "sport": sport}
+    )
+    return [c["slug"] for c in data["cardShardsPoolCompetitions"]]
+
+
+CLUBS_DES_COMPETITIONS_QUERY = """
+query ClubsDesCompetitions($slugs: [String!]!) {
+  football {
+    competitions(slugs: $slugs) {
+      slug
+      clubs(first: 100) {
+        nodes { slug }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
+def clubs_des_competitions(
+    client: SorareClient, slugs_competitions: list[str]
+) -> list[dict[str, Any]]:
+    """Les clubs de chaque compétition (première page, 100 clubs), en un
+    seul appel pour toutes les compétitions à la fois.
+
+    Returns:
+        `[{"slug": str, "clubs": {"nodes": [...], "pageInfo": {...}}}, ...]`
+        — les compétitions à plus de 100 clubs (coupes continentales) ont
+        `pageInfo.hasNextPage=True`, à repaginer avec
+        `clubs_dune_competition_page`.
+    """
+    if not slugs_competitions:
+        return []
+    data = client.execute(CLUBS_DES_COMPETITIONS_QUERY, variables={"slugs": slugs_competitions})
+    return data["football"]["competitions"]
+
+
+CLUBS_DUNE_COMPETITION_PAGE_QUERY = """
+query ClubsDuneCompetitionPage($slug: String!, $after: String) {
+  football {
+    competitions(slugs: [$slug]) {
+      clubs(first: 100, after: $after) {
+        nodes { slug }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
+def clubs_dune_competition_page(
+    client: SorareClient, slug_competition: str, apres: str | None
+) -> dict[str, Any]:
+    """Une page supplémentaire de clubs pour une compétition à plus de 100
+    clubs — voir `clubs_des_competitions`."""
+    data = client.execute(
+        CLUBS_DUNE_COMPETITION_PAGE_QUERY, variables={"slug": slug_competition, "after": apres}
+    )
+    return data["football"]["competitions"][0]["clubs"]
+
+
+# ⚠️ `anyActivePlayers` **ne peut pas être imbriqué dans une liste** (le SDL
+# le documente explicitement) et Sorare refuse plusieurs `team(slug:)` à la
+# racine, même aliasés (« Duplicated root field »). La voie qui marche :
+# plusieurs `club(slug:)` aliasés en sous-champs d'un même `football { }` —
+# mesuré côté Apps Script jusqu'à 150 clubs par appel sans dépasser le
+# plafond de complexité (30 000 ; ~56 par club).
+TAILLE_LOT_CLUBS_JOUEURS_DEFAUT = 150
+
+
+def _requete_pool_joueurs_lot(nombre: int) -> str:
+    """Construit une requête à `nombre` alias — un par club — même principe
+    que `_requete_historique_prix_lot` (variables, pas de littéraux
+    concaténés dans le texte de la requête)."""
+    declarations = ", ".join(f"$slug{i}: String!" for i in range(nombre))
+    champs = "\n".join(
+        f"    a{i}: club(slug: $slug{i}) {{\n"
+        "      slug\n"
+        "      activeCompetitions { slug format }\n"
+        "      anyActivePlayers(first: 50) {\n"
+        "        pageInfo { hasNextPage endCursor }\n"
+        "        nodes { ... on Player { slug displayName } }\n"
+        "      }\n"
+        "    }"
+        for i in range(nombre)
+    )
+    return f"query PoolJoueursLot({declarations}) {{\n  football {{\n{champs}\n  }}\n}}"
+
+
+def joueurs_actifs_des_clubs_lot(
+    client: SorareClient, slugs_clubs: list[str]
+) -> list[dict[str, Any] | None]:
+    """Les joueurs actifs de plusieurs clubs en un seul appel (alias GraphQL).
+
+    ⚠️ Contrairement à `players(slugs:)`/`clubs(slugs:)`, un slug de club
+    inconnu ici fait échouer TOUT l'appel (`Team(slug=...) not found`,
+    d'après le comportement Apps Script) — sans gravité tant que les slugs
+    viennent de l'API elle-même dans la même passe (jamais tapés à la main),
+    comme pour le référentiel construit par `cli/maj_referentiel_joueurs.py`.
+    Pas capturée ici : une erreur systématique doit remonter, pas tronquer
+    silencieusement le pool.
+
+    Returns:
+        Une liste de même longueur et même ordre que `slugs_clubs` : pour
+        chaque club, le nœud `club` brut (`slug`, `activeCompetitions`,
+        `anyActivePlayers`), ou `None` si l'alias n'a rien renvoyé.
+    """
+    if not slugs_clubs:
+        return []
+    requete = _requete_pool_joueurs_lot(len(slugs_clubs))
+    variables = {f"slug{i}": slug for i, slug in enumerate(slugs_clubs)}
+    data = client.execute(requete, variables=variables)
+    football = data.get("football") or {}
+    return [football.get(f"a{i}") for i in range(len(slugs_clubs))]
+
+
+JOUEURS_ACTIFS_CLUB_PAGE_QUERY = """
+query JoueursActifsClubPage($slug: String!, $after: String) {
+  football {
+    club(slug: $slug) {
+      anyActivePlayers(first: 50, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { ... on Player { slug displayName } }
+      }
+    }
+  }
+}
+"""
+
+
+def joueurs_actifs_club_page(
+    client: SorareClient, slug_club: str, apres: str | None
+) -> dict[str, Any]:
+    """Une page supplémentaire de joueurs actifs pour un club à plus de 50
+    joueurs actifs (mesuré côté Apps Script : ~15 clubs sur ~800)."""
+    data = client.execute(
+        JOUEURS_ACTIFS_CLUB_PAGE_QUERY, variables={"slug": slug_club, "after": apres}
+    )
+    return data["football"]["club"]["anyActivePlayers"]

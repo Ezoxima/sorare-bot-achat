@@ -48,7 +48,7 @@ def creer_tables() -> None:
     Importe les modules de modèles ici (pas en haut de fichier) : ils
     importent `Base` depuis ce module, un import en tête créerait un cycle.
     """
-    from acheteur.marche import liste_liquidite  # noqa: F401
+    from acheteur.marche import liste_liquidite, referentiel_joueurs  # noqa: F401
     from acheteur.negociation import journal  # noqa: F401
 
     Base.metadata.create_all(obtenir_moteur())
