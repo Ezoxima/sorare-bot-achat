@@ -26,15 +26,16 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from acheteur.auth.jeton import JetonAbsentError, JetonExpireError, obtenir_jeton_valide
 from acheteur.auth.renouvellement import renouveler_si_necessaire
 from acheteur.cli.scan_marche import (
-    SEUIL_BONNE_AFFAIRE_DEFAUT,
-    STOCK_MAX_VENDEUR_DEFAUT,
     OFFRE_GROUPEE_CARTES_MAX_PAR_VENDEUR_DEFAUT,
     OFFRE_GROUPEE_VENDEURS_MAX_DEFAUT,
+    SEUIL_BONNE_AFFAIRE_DEFAUT,
     SOUS_VENTE_MINI_SEUIL_POURCENT_DEFAUT,
+    STOCK_MAX_VENDEUR_DEFAUT,
     _bonnes_affaires,
     _calculer_candidates,
     _completer_par_vitrines_vendeurs,
@@ -52,8 +53,8 @@ from acheteur.marche import Annonce, annonces_depuis_noeuds_marche
 from acheteur.marche.liste_liquidite import (
     JoueurLiquide,
     derniere_maj,
-    liste_perimee,
     lire_liste_liquidite,
+    liste_perimee,
 )
 from acheteur.marche.traduction import (
     rarity_brute_depuis_annonce,
@@ -61,6 +62,28 @@ from acheteur.marche.traduction import (
 )
 from acheteur.sorare import requetes
 from acheteur.sorare.client import SorareClient
+
+
+def _annonces_des_couples(
+    client: SorareClient, couples: list[JoueurLiquide], intervalle_log: int = 100
+) -> list[Annonce]:
+    """Interroge chaque couple liquide, un appel réseau à la fois (pas
+    batché, contrairement à `maj_liste_liquidite.py` — voir DECISIONS.md,
+    2026-09-22, pour la piste de batching non encore faite).
+
+    Journalise une ligne de progression tous les `intervalle_log` couples :
+    avec plusieurs milliers de couples (2 942 mesurés le 2026-09-22,
+    DECISIONS.md), un run sans retour intermédiaire pendant de longues
+    minutes ressemble à un blocage — signal réclamé par l'utilisateur.
+    """
+    annonces: list[Annonce] = []
+    debut = time.monotonic()
+    for i, couple in enumerate(couples, start=1):
+        annonces.extend(_annonces_du_couple(client, couple))
+        if i % intervalle_log == 0 or i == len(couples):
+            ecoule = time.monotonic() - debut
+            print(f"  ... {i}/{len(couples)} couples interrogés ({ecoule:.0f} s)")
+    return annonces
 
 
 def _annonces_du_couple(client: SorareClient, couple: JoueurLiquide) -> list[Annonce]:
@@ -149,9 +172,7 @@ def main() -> int:
         print()
 
         print(f"Recherche des annonces actuelles pour {len(couples)} couple(s)...")
-        annonces: list[Annonce] = []
-        for couple in couples:
-            annonces.extend(_annonces_du_couple(client, couple))
+        annonces = _annonces_des_couples(client, couples)
         print(f"  {len(annonces)} annonce(s) trouvee(s)")
         print()
 

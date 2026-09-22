@@ -38,7 +38,7 @@ from acheteur.approbation import (
 )
 from acheteur.auth.jeton import JetonAbsentError, JetonExpireError, obtenir_jeton_valide
 from acheteur.auth.renouvellement import renouveler_si_necessaire
-from acheteur.cli.scan_liste_liquidite import _annonces_du_couple
+from acheteur.cli.scan_liste_liquidite import _annonces_des_couples
 from acheteur.cli.scan_marche import (
     OFFRE_GROUPEE_CARTES_MAX_PAR_VENDEUR_DEFAUT,
     OFFRE_GROUPEE_VENDEURS_MAX_DEFAUT,
@@ -58,7 +58,6 @@ from acheteur.cli.scan_marche import (
 from acheteur.core.db import creer_tables, session_scope
 from acheteur.core.horloge import HorlogeSysteme
 from acheteur.core.journalisation import configurer_journalisation
-from acheteur.marche import Annonce
 from acheteur.marche.liste_liquidite import derniere_maj, lire_liste_liquidite, liste_perimee
 from acheteur.negociation import reconcilier
 from acheteur.sorare import requetes
@@ -112,9 +111,10 @@ def main() -> int:
         soldes = _soldes_reels(compte)
         offres_ouvertes = _offres_ouvertes_par_devise_info(session)
 
-        annonces: list[Annonce] = []
-        for couple in couples:
-            annonces.extend(_annonces_du_couple(client, couple))
+        print(f"Recherche des annonces actuelles pour {len(couples)} couple(s)...")
+        annonces = _annonces_des_couples(client, couples)
+        print(f"  {len(annonces)} annonce(s) trouvee(s)")
+        print()
 
         candidates, illiquide, sans_reference = _calculer_candidates(client, horloge, annonces)
         bonnes_affaires = _bonnes_affaires(candidates, SEUIL_BONNE_AFFAIRE_DEFAUT)

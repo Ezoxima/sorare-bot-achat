@@ -1452,3 +1452,31 @@ l'effet réel sur la répartition des propositions restent à observer.
 utilisés ailleurs — `scan_marche.py`, `premiere_offre_reelle.py` — pas
 touchés). Tests mis à jour : `test_liste_liquidite_l9.py::TestCouplesDistincts`
 remplacé par `TestCouplesDuReferentiel` (4 cas). 313 tests passent.
+
+## 2026-09-22 — Log de progression sur `scan_liste_liquidite.py`/`proposer_periodique.py`
+
+Suite au câblage sur le référentiel (2 942 couples liquides, entrée
+ci-dessus) : `cli/scan_liste_liquidite.py::_annonces_du_couple` fait **un
+appel réseau par couple, séquentiel** (contrairement à
+`maj_liste_liquidite.py`, batché par lots de 200 alias) — avec 2 942
+couples au lieu des 19 d'avant, un run sans retour intermédiaire pendant
+plusieurs minutes ressemble à un blocage. Constaté en session : le premier
+run réel après le câblage a nettement dépassé les 3-4 minutes de l'Apps
+Script équivalent (non batché non plus côté `.gs` sur cette étape
+précise, mais sur un jeu de couples plus petit).
+
+**Correctif minimal, pas le vrai correctif de fond.** Nouvelle fonction
+`_annonces_des_couples` (remplace la boucle en ligne dans `main()`) :
+imprime `i/N couples interrogés (Xs)` tous les 100 couples. Ne réduit pas
+le nombre d'appels réseau ni le temps total — donne seulement un signal de
+progression. **Le vrai correctif (batcher `_annonces_du_couple` par lots
+d'alias, comme `_calculer_candidates` le fait déjà pour l'historique de
+prix) reste à faire**, décision explicite de l'utilisateur de le traiter
+séparément (« log la tâche » demandé en premier, pas le batching).
+
+Partagée entre `scan_liste_liquidite.py` et `proposer_periodique.py` (ce
+dernier important déjà `_annonces_du_couple` depuis l'autre — bascule sur
+`_annonces_des_couples` sans dupliquer la logique de progression). Aucun
+test dédié ajouté : fonction d'orchestration réseau, même statut que
+`_calculer_candidates`/`_completer_par_vitrines_vendeurs` (non testées
+unitairement, couvertes par les runs réels).
