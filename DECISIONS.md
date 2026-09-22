@@ -1238,3 +1238,38 @@ un stock trop gros ou absent (`_filtrer_par_stock_vendeur`).
 
 Les trois points sont mesurés et consignés dans MESURES.md (pas seulement
 supposés). 268 tests passent après ces correctifs.
+
+## 2026-09-22 — Lot L10 : mesure du taux d'acceptation
+
+**Lecture seule, hors barrière.** `acheteur/mesure/acceptation.py` (fonction
+pure, comme `decision/` et `negociation.reconciliation.apparier`) +
+`cli/mesure_acceptation.py`, qui n'interroge que la base locale — aucun
+réseau, aucun appel à `enregistrer_ligne` (voir `tests/test_unique_path.py`,
+inchangé par ce lot).
+
+**Ce qui compte comme « conclu » : `ACCEPTEE`, `REFUSEE`, `EXPIREE`,
+`ANNULEE`.** PLAN.md ne précise pas explicitement le périmètre. Une ligne
+encore ouverte (`SIMULEE`/`ENVOYEE`) ou en sommeil (`EN_SOMMEIL`,
+lot L7) n'a pas de verdict — l'exclure du calcul plutôt que de la compter
+comme un refus ou un succès évite de fausser le taux avec des négociations
+en cours. `EXPIREE`/`ANNULEE` comptent comme des issues non acceptées : ce
+sont des faits observés (le vendeur n'a pas vendu à ce prix, ou l'offre a
+été retirée), pas une absence de donnée.
+
+**Exclusions du calcul : lignes simulées (`mode_simulation`) et importées
+(`import_automatique`).** Une ligne simulée n'a jamais été vue par un
+vendeur réel — la compter mesurerait le simulateur, pas le marché. Une ligne
+importée (offre manuelle, PLAN.md § réconciliation) n'a pas de palier décidé
+par le bot : rien à évaluer. Comptées séparément (`lignes_hors_perimetre`)
+pour transparence, jamais mélangées aux totaux.
+
+**Aucun seuil d'effectif minimal codé en dur.** PLAN.md liste explicitement
+« combien d'offres il faut avoir envoyées avant qu'un taux soit autre chose
+que du bruit » comme une question ouverte, réservée à l'utilisateur — ce
+lot se contente de rapporter les effectifs à côté de chaque taux
+(`TauxParPalier.total`, `None` plutôt que 0.0 quand `total == 0`) plutôt que
+de trancher une décision qui n'est pas la sienne. C'est ce jugement humain,
+pas un seuil codé, qui conditionne l'ouverture de L11.
+
+11 tests ajoutés (`tests/test_mesure_acceptation_l10.py`). 279 tests
+passent.

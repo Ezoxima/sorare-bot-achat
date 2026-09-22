@@ -285,6 +285,14 @@ def lignes_ouvertes(
     return list(requete.order_by(OffreJournal.id).all())
 
 
+def toutes_les_lignes(session: Session) -> list[OffreJournal]:
+    """Toutes les lignes du journal, ouvertes ou closes — contrairement à
+    `lignes_ouvertes`. Utilisée par la mesure (lot L10, `acheteur.mesure`),
+    qui a justement besoin des lignes closes pour compter un verdict.
+    """
+    return list(session.query(OffreJournal).order_by(OffreJournal.id).all())
+
+
 def reessai_expiration_deja_fait(session: Session, ligne: OffreJournal) -> bool:
     """Dit si `ligne` est elle-même née d'un ré-essai sur expiration — donc
     si, en cas de nouvelle expiration, PLAN.md interdit d'en retenter un
