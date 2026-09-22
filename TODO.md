@@ -44,10 +44,42 @@ milliers de couples » — ici, `--premieres 500` (défaut) ne récupère que 50
 annonces brutes du marché entier, réduites à 273 couples distincts après
 traduction/dédoublonnage, sur un marché mesuré à **543 496 annonces au
 total** (MESURES.md, 2026-09-22). L'échantillon actuel couvre environ
-0,1 % du marché — l'Apps Script balayait très probablement le marché
-autrement (liste de joueurs complète, pagination beaucoup plus profonde,
-ou référentiel externe) plutôt qu'un tirage des 500 annonces les plus
-fraîches. Renforce l'hypothèse (1) ci-dessus sans encore la confirmer
-formellement (pas mesuré la répartition par rareté dans l'échantillon
-brut) — la méthode Apps Script exacte reste à comparer point par point
-avec `maj_liste_liquidite.py` avant de corriger.
+0,1 % du marché.
+
+**Confirmé, pas juste une hypothèse : l'utilisateur a fourni le code source
+réel de `sealing-sorare-apps-script/02 - liste bonnes affaires.gs`
+(2026-09-22).** La méthode d'échantillonnage n'a rien à voir avec la nôtre :
+
+- `majListeComplete()` (référencé, pas encore vu) balaie **le pool COMPLET
+  de 36 065 joueurs** et écrit, pour chacun, s'il a une annonce en cours
+  (`Joueurs_en_vente`) — un balayage exhaustif par JOUEUR, pas un tirage
+  dans le flux d'annonces.
+- `majListeBonnesAffaires()` part de cette liste complète et mesure
+  liquidité (`liquiditeParCouple_`) + profondeur de carnet
+  (`carnetParJoueur_`) pour CHAQUE joueur qui vend, sans échantillonnage
+  supplémentaire.
+
+Chez nous, `maj_liste_liquidite.py::main()` interroge
+`annonces_marche_paginees` (le marché entier, trié par fraîcheur de mise à
+jour) et s'arrête à `--premieres` annonces (500 par défaut) — **on ne
+balaie jamais les joueurs, on pioche dans le flux d'annonces les plus
+récentes.** C'est structurellement différent : une carte qui se revend
+souvent revient sans cesse dans ce flux (donc généralement peu chère) ;
+une carte chère revendue une fois par mois n'apparaît presque jamais dans
+les 500 premières. **Hypothèse (1) du TODO confirmée par le code source
+réel, pas seulement plausible.**
+
+**Le correctif identifié (pas encore fait)** : écrire un équivalent de
+`majListeComplete()` côté `acheteur` — balayer une liste de référence des
+joueurs (via `players()` ou un référentiel équivalent) et vérifier pour
+chacun s'il a une annonce en cours, plutôt que d'échantillonner le flux
+`liveSingleSaleOffers` trié par fraîcheur. `maj_liste_liquidite.py`
+resterait ensuite quasi inchangé (il ne ferait plus que mesurer la
+liquidité sur cette liste complète, comme aujourd'hui sur son petit
+échantillon).
+
+**Cadence confirmée par l'utilisateur (2026-09-22) : une fois par jour**,
+comme l'Apps Script (`majListeBonnesAffaires()`, « à programmer une fois
+par jour ») — cohérent avec `DELAI_RAFRAICHISSEMENT_HEURES = 24` déjà en
+place côté `acheteur` (`marche/liste_liquidite.py`), qui n'a donc pas
+besoin de changer une fois le vrai correctif écrit.
