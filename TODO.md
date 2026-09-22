@@ -124,9 +124,18 @@ mesurés**, contre 19 avec l'ancien pipeline (155x plus). Le diagnostic
 initial de ce TODO (échantillonnage biaisé vers les cartes bon marché) est
 corrigé côté construction de la liste.
 
-**Reste à vérifier : l'effet réel sur les propositions.** Personne n'a
-encore relancé `proposer_periodique.py` depuis ce nouveau run de
-`maj_liste_liquidite.py` — il faut le faire pour confirmer que la
-répartition par rareté/prix des propositions a vraiment changé (le but
-recherché depuis le début de ce fil), pas seulement le nombre de couples
-liquides en base.
+**Vérifié et confirmé (2026-09-22, voir MESURES.md) : effet réel sur les
+propositions.** `proposer_periodique.py` relancé après le run complet de
+`maj_liste_liquidite.py` — propositions incluant des joueurs Rare (Ramiz
+Zerrouki 47€, Fabian Wilfinger 6,3€) et un total EUR proposé dans le
+budget de 56,53€, contre 2,11€ avant ce lot. **Ce fil du TODO est clos** :
+le biais d'échantillonnage identifié le 2026-09-22 (échantillon par
+fraîcheur d'annonces → liste liquide dominée par des cartes bon marché)
+est corrigé de bout en bout, mesuré contre le réel à chaque étape.
+
+**Reste ouvert, séparément** : batcher `_annonces_du_couple`
+(`scan_liste_liquidite.py`) par lots d'alias — un run scanne aujourd'hui
+2 942 couples avec un appel réseau chacun, séquentiel, plusieurs minutes.
+Un log de progression a été ajouté (2026-09-22, DECISIONS.md) mais ne
+réduit pas le temps réel. Pas un chantier urgent (le job tourne en tâche
+planifiée, pas en interactif), mais à traiter si la durée devient gênante.

@@ -544,10 +544,15 @@ pipeline (échantillonnage par fraîcheur d'annonces, 2026-09-22, avant ce
 lot) : **155 fois plus de couples liquides retenus.**
 
 Temps d'exécution et nombre exact d'appels réseau non chronométrés par
-l'utilisateur (collé seulement la fin de la sortie). Reste à observer :
-l'effet réel sur `cli/proposer_periodique.py` (répartition par rareté et
-par prix des propositions générées à partir de cette nouvelle liste) —
-c'était le but recherché depuis le début du fil (voir TODO.md).
+l'utilisateur (collé seulement la fin de la sortie).
+
+**Effet confirmé sur `cli/proposer_periodique.py` (même jour, run réel)** :
+propositions incluant enfin des joueurs Rare (ex. Ramiz Zerrouki, 47€
+demandé ; Fabian Wilfinger, 6,3€) et des montants nettement plus élevés
+qu'avant (Christopher Willock/Rokas Pukštas à quelques centimes,
+2026-09-22 plus tôt dans la session) — total EUR proposé dans le budget :
+**56,53€**, contre 2,11€ avant le câblage sur le référentiel. C'était le
+but recherché depuis le début du fil (TODO.md) : objectif atteint.
 
 ## Prochaines mesures attendues, dans l'ordre
 
