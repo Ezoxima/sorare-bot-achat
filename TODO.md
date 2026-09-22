@@ -110,13 +110,13 @@ d'annonces trié par fraîcheur), pas le référentiel. Tant que ce câblage
 n'est pas fait, `maj_referentiel_joueurs.py` construit une liste inutilisée
 par le reste du pipeline.
 
-**Non vérifié contre l'API réelle** (voir MESURES.md) : ni la méthode
-d'énumération (compétitions → clubs → joueurs actifs) ni son coût réel en
-appels/temps côté Python — seulement portée du comportement mesuré côté
-Apps Script par l'utilisateur. À vérifier au premier
-`python -m acheteur.cli.maj_referentiel_joueurs` réel : nombre de clubs,
-nombre de joueurs (attendu ~800 clubs / ~26 000 joueurs, valeurs Apps
-Script), et confirmer qu'aucun slug de club renvoyé par
-`clubs_des_competitions` ne fait échouer `joueurs_actifs_des_clubs_lot`
-(le SDL ne documente pas ce comportement, seul le retour d'expérience Apps
-Script — « Team(slug=...) not found » sur tout le lot — le suggère).
+**Vérifié contre l'API réelle (2026-09-22, voir MESURES.md)** : l'utilisateur
+a lancé `python -m acheteur.cli.maj_referentiel_joueurs` — 26 589 joueurs
+écrits, cohérent avec l'estimation Apps Script (~26 000). La méthode
+d'énumération marche donc bien côté Python, pas seulement côté Apps
+Script. Pas encore mesurés séparément : nombre de clubs, appels réseau,
+temps d'exécution (voir MESURES.md pour le détail de ce qui manque).
+
+**Reste ouvert : brancher ce référentiel dans `maj_liste_liquidite.py`**
+(voir paragraphe ci-dessus) — c'est la partie qui changera réellement le
+résultat des propositions, pas encore faite.

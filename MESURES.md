@@ -517,6 +517,21 @@ Vérifié aussi contre un vrai vendeur (`satonio`, 16 198 annonces en cours)
 (`nickname`, `totalCount`, nœuds au format `TokenOffer` identique à
 `ANNONCES_MARCHE_QUERY`).
 
+## 2026-09-22 — Référentiel de joueurs : la méthode portée d'Apps Script marche contre l'API réelle
+
+L'utilisateur a lancé `python -m acheteur.cli.maj_referentiel_joueurs`
+lui-même. **26 589 joueurs écrits dans le référentiel local**, cohérent
+avec l'estimation donnée par l'Apps Script d'origine (~26 000, mesurée
+là-bas le 2026-09-22 également) — confirme que la méthode en quatre étapes
+(compétitions énumérables → clubs des compétitions paginés → joueurs
+actifs par club, aliasé/paginé) fonctionne bien contre l'API Python, pas
+seulement contre l'implémentation Apps Script d'origine.
+
+Pas encore mesuré séparément : le nombre de clubs, le nombre d'appels
+réseau, le temps d'exécution (l'utilisateur n'a collé que la dernière
+ligne de sortie). À demander au prochain run si ces chiffres deviennent
+utiles (ex. pour dimensionner `TAILLE_LOT_CLUBS_JOUEURS_DEFAUT`).
+
 ## Prochaines mesures attendues, dans l'ordre
 
 1. **Etat du compte (référence du 2026-09-20)** →
