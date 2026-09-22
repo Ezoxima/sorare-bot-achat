@@ -5,15 +5,35 @@ Sorare. Job « lent », à programmer une fois toutes les
 `DELAI_RAFRAICHISSEMENT_HEURES` (24h par défaut, voir
 `marche.liste_liquidite` — choix explicite de l'utilisateur, 2026-09-22).
 
-Ce script ne décide rien et n'envoie rien : il alimente la liste que la
-future passe rapide (lot L9, PLAN.md) lira au lieu de recalculer la
-liquidité de zéro à chaque exécution. Le pré-filtre lui-même
-(`marche.liquidite.est_liquide`) est déjà utilisé par `cli/scan_marche.py`
-(lot L8) ; ce script ne fait que le persister.
+**Câblé sur le référentiel de joueurs (2026-09-22), pas sur un échantillon
+du marché.** Jusqu'ici ce script échantillonnait les annonces les plus
+récemment mises à jour du marché entier (`annonces_marche_paginees`) — un
+biais structurel confirmé (TODO.md, 2026-09-22, à partir du code source
+réel de `sealing-sorare-apps-script`) : une carte qui se revend souvent
+(donc généralement peu chère) revenait sans cesse dans cet échantillon, une
+carte chère mise en vente une fois restait hors échantillon indéfiniment.
+Ce script mesure maintenant la liquidité de TOUS les joueurs du référentiel
+(`marche.referentiel_joueurs`, construit par
+`cli/maj_referentiel_joueurs.py`) — même principe que `liquiditeParCouple_`
+côté Apps Script : chaque joueur est mesuré sur 2 raretés (limited, rare) ×
+2 éligibilités de saison (CLASSIC, IN_SEASON), qu'il ait ou non une annonce
+en cours au moment du scan.
+
+⚠️ **Coût mesuré à ~26 000 joueurs (MESURES.md, 2026-09-22) : ~106 000
+couples, ~530 appels réseau par lots de 200 alias, de l'ordre de 10 minutes**
+(estimé à partir de `TAILLE_LOT_HISTORIQUE_PRIX_DEFAUT`, ~1,1 s/lot mesuré
+ailleurs). Acceptable pour un job quotidien, pas pour un usage plus fréquent.
+
+Ce script ne décide rien et n'envoie rien : il alimente la liste que
+`cli/scan_liste_liquidite.py`/`cli/proposer_periodique.py` lisent au lieu
+de recalculer la liquidité de zéro à chaque exécution. Le pré-filtre
+lui-même (`marche.liquidite.est_liquide`) est déjà utilisé par
+`cli/scan_marche.py` (lot L8) ; ce script ne fait que le persister à
+l'échelle du référentiel complet.
 
 Usage :
     python -m acheteur.cli.maj_liste_liquidite
-    python -m acheteur.cli.maj_liste_liquidite --premieres 500
+    python -m acheteur.cli.maj_liste_liquidite --limite-joueurs 200   (test rapide)
 """
 
 from __future__ import annotations
@@ -27,45 +47,44 @@ from acheteur.core.db import creer_tables, session_scope
 from acheteur.core.horloge import Horloge, HorlogeSysteme
 from acheteur.core.journalisation import configurer_journalisation
 from acheteur.marche import (
-    Annonce,
     Joueur,
-    annonces_depuis_noeuds_marche,
     est_liquide,
     mesurer_liquidite,
     rarete_depuis_sorare,
-    rarity_brute_depuis_annonce,
-    season_eligibility_brute_depuis_annonce,
     ventes_depuis_noeuds_prix,
 )
 from acheteur.marche.liste_liquidite import remplacer_liste_liquidite
+from acheteur.marche.referentiel_joueurs import (
+    JoueurReferentiel,
+    derniere_maj_referentiel,
+    lire_referentiel_joueurs,
+    referentiel_perime,
+)
 from acheteur.sorare import requetes
 from acheteur.sorare.client import SorareClient
 
-NOMBRE_ANNONCES_EXAMINEES_DEFAUT = 500
+# Mêmes couples que `liquiditeParCouple_` côté Apps Script (DECISIONS.md,
+# 2026-09-22) : 2 raretés × 2 éligibilités de saison par joueur, pas
+# seulement la combinaison actuellement en vente.
+RARETES_MESUREES = ["limited", "rare"]
+SAISONS_MESUREES = ["CLASSIC", "IN_SEASON"]
 
 
-def _couples_distincts(annonces: list[Annonce]) -> list[dict]:
-    """Les couples (joueur, rareté, éligibilité de saison) distincts d'un
-    échantillon d'annonces — plusieurs vendeurs peuvent proposer le même
-    couple, il ne doit être mesuré qu'une fois.
+def _couples_du_referentiel(
+    joueurs: list[JoueurReferentiel],
+    raretes: list[str] = RARETES_MESUREES,
+    saisons: list[str] = SAISONS_MESUREES,
+) -> list[dict]:
+    """Le produit cartésien joueurs × raretés × saisons à mesurer.
 
     Fonction pure : pas de réseau, testable sur des cas figés.
     """
-    vus: dict[tuple[str, str, str], dict] = {}
-    for annonce in annonces:
-        cle = (
-            annonce.joueur.slug,
-            rarity_brute_depuis_annonce(annonce),
-            season_eligibility_brute_depuis_annonce(annonce),
-        )
-        if cle in vus:
-            continue
-        vus[cle] = {
-            "joueur_slug": cle[0],
-            "rarete": cle[1],
-            "season_eligibility": cle[2],
-        }
-    return list(vus.values())
+    return [
+        {"joueur_slug": joueur.joueur_slug, "rarete": rarete, "season_eligibility": saison}
+        for joueur in joueurs
+        for rarete in raretes
+        for saison in saisons
+    ]
 
 
 def _entrees_liquides(
@@ -92,7 +111,7 @@ def _entrees_liquides(
         ]
         resultats = requetes.historique_prix_joueurs_lot(client, demandes)
 
-        for couple, noeuds_prix in zip(lot, resultats):
+        for couple, noeuds_prix in zip(lot, resultats, strict=True):
             # Un `Joueur` minimal, seulement pour porter le slug attendu par
             # `ventes_depuis_noeuds_prix` (le nom/la rareté ne servent pas à
             # `mesurer_liquidite`, qui ne regarde que les dates).
@@ -120,14 +139,22 @@ def main() -> int:
     configurer_journalisation()
 
     parser = argparse.ArgumentParser(
-        description="Reconstruit la liste des couples joueur/rareté/saison liquides. "
-        "Lecture seule côté Sorare ; écrit uniquement dans la base locale."
+        description="Reconstruit la liste des couples joueur/rareté/saison liquides, a "
+        "partir du referentiel complet de joueurs. Lecture seule cote Sorare ; ecrit "
+        "uniquement dans la base locale."
     )
     parser.add_argument(
-        "--premieres",
+        "--limite-joueurs",
         type=int,
-        default=NOMBRE_ANNONCES_EXAMINEES_DEFAUT,
-        help=f"Taille de l'échantillon d'annonces examinées (défaut {NOMBRE_ANNONCES_EXAMINEES_DEFAUT}).",
+        default=None,
+        help="Ne mesurer que les N premiers joueurs du referentiel (test rapide, pas "
+        "un usage normal — la liste liquide serait tronquee).",
+    )
+    parser.add_argument(
+        "--ignorer-peremption",
+        action="store_true",
+        help="Continue meme si le referentiel de joueurs n'a pas ete reconstruit depuis "
+        "le delai prevu (deconseille : la liste liquide porterait sur un pool obsolete).",
     )
     args = parser.parse_args()
 
@@ -142,22 +169,39 @@ def main() -> int:
     info = renouveler_si_necessaire(info, horloge)
 
     with session_scope() as session, SorareClient(jwt=info.token, jwt_aud=info.aud) as client:
-        print(f"Récupération de {args.premieres} annonces du marché (par pages de "
-              f"{requetes.TAILLE_PAGE_ANNONCES_MARCHE})...")
-        noeuds_marche = requetes.annonces_marche_paginees(client, maximum=args.premieres)
-        annonces = annonces_depuis_noeuds_marche(noeuds_marche)
-        print(f"  {len(annonces)} annonces traduites (sur {len(noeuds_marche)} nœuds bruts)")
+        maintenant = horloge.maintenant()
 
-        couples = _couples_distincts(annonces)
-        print(f"  {len(couples)} couples (joueur, rareté, saison) distincts à mesurer")
+        if referentiel_perime(session, maintenant):
+            maj = derniere_maj_referentiel(session)
+            message = (
+                "Referentiel de joueurs absent ou perime "
+                f"(derniere reconstruction : {maj if maj else 'jamais'}). "
+                "Lance d'abord : python -m acheteur.cli.maj_referentiel_joueurs"
+            )
+            if not args.ignorer_peremption:
+                print(message, file=sys.stderr)
+                return 1
+            print(f"  AVERTISSEMENT : {message} (--ignorer-peremption : on continue quand meme)")
+
+        joueurs = lire_referentiel_joueurs(session)
+        if args.limite_joueurs is not None:
+            joueurs = joueurs[: args.limite_joueurs]
+        print(f"{len(joueurs)} joueur(s) dans le referentiel a mesurer "
+              f"({len(RARETES_MESUREES)} rarete(s) x {len(SAISONS_MESUREES)} saison(s)).")
+        if not joueurs:
+            print("Referentiel vide. Rien a mesurer.", file=sys.stderr)
+            return 1
+
+        couples = _couples_du_referentiel(joueurs)
+        print(f"  {len(couples)} couples a mesurer")
         print()
 
-        print("Mesure de la liquidité (par lot)...")
+        print("Mesure de la liquidite (par lot)...")
         entrees = _entrees_liquides(client, horloge, couples)
         print(f"  {len(entrees)} couples liquides retenus sur {len(couples)}")
 
-        nb_ecrites = remplacer_liste_liquidite(session, entrees, horloge.maintenant())
-        print(f"Liste remplacée : {nb_ecrites} ligne(s) écrite(s) dans la base locale.")
+        nb_ecrites = remplacer_liste_liquidite(session, entrees, maintenant)
+        print(f"Liste remplacee : {nb_ecrites} ligne(s) ecrite(s) dans la base locale.")
 
     return 0
 

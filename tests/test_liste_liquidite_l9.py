@@ -1,6 +1,7 @@
 """Persistance de la liste des couples liquides (`marche/liste_liquidite.py`)
-et déduplication des couples (`cli/maj_liste_liquidite.py`) — voir
-DECISIONS.md (2026-09-22, préparation du lot L9)."""
+et construction des couples à mesurer depuis le référentiel de joueurs
+(`cli/maj_liste_liquidite.py`) — voir DECISIONS.md (2026-09-22, câblage sur
+le référentiel plutôt que sur un échantillon du marché)."""
 
 from __future__ import annotations
 
@@ -10,18 +11,16 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from acheteur.cli.maj_liste_liquidite import _couples_distincts
+from acheteur.cli.maj_liste_liquidite import _couples_du_referentiel
 from acheteur.core.db import Base
-from acheteur.marche.devises import Devise, Montant
 from acheteur.marche.liste_liquidite import (
     DELAI_RAFRAICHISSEMENT_HEURES,
-    JoueurLiquide,
     derniere_maj,
-    liste_perimee,
     lire_liste_liquidite,
+    liste_perimee,
     remplacer_liste_liquidite,
 )
-from acheteur.marche.types import Annonce, Joueur, Rareté
+from acheteur.marche.referentiel_joueurs import JoueurReferentiel
 
 BASE = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
 
@@ -36,40 +35,38 @@ def session():
     s.close()
 
 
-def _annonce(joueur_slug: str, rarete_nom: str = "Limited", in_season: bool = True) -> Annonce:
-    return Annonce(
-        joueur=Joueur(slug=joueur_slug, nom=joueur_slug, rareté=Rareté(rarete_nom, 2)),
-        vendeur_slug="vendeur1",
-        prix_demande=Montant(100, Devise.EUR),
-        accepte_eth=False,
-        accepte_eur=True,
-        date_pose=BASE,
-        in_season=in_season,
+def _joueur_referentiel(slug: str) -> JoueurReferentiel:
+    return JoueurReferentiel(
+        joueur_slug=slug, nom=slug, club_slug="club1", competition="ligue-1", maj_le=BASE
     )
 
 
-class TestCouplesDistincts:
-    def test_deduplique_meme_couple_chez_deux_vendeurs(self):
-        annonces = [_annonce("messi"), _annonce("messi")]
-        couples = _couples_distincts(annonces)
-        assert len(couples) == 1
-        assert couples[0] == {
-            "joueur_slug": "messi",
-            "rarete": "limited",
-            "season_eligibility": "IN_SEASON",
+class TestCouplesDuReferentiel:
+    def test_produit_cartesien_rarete_x_saison(self):
+        couples = _couples_du_referentiel([_joueur_referentiel("messi")])
+        assert len(couples) == 4  # 2 raretés x 2 saisons
+        assert {(c["rarete"], c["season_eligibility"]) for c in couples} == {
+            ("limited", "CLASSIC"), ("limited", "IN_SEASON"),
+            ("rare", "CLASSIC"), ("rare", "IN_SEASON"),
         }
 
-    def test_garde_classic_et_in_season_separes(self):
-        annonces = [_annonce("messi", in_season=True), _annonce("messi", in_season=False)]
-        couples = _couples_distincts(annonces)
-        assert len(couples) == 2
-        assert {c["season_eligibility"] for c in couples} == {"IN_SEASON", "CLASSIC"}
+    def test_un_couple_par_joueur_et_par_combinaison(self):
+        couples = _couples_du_referentiel(
+            [_joueur_referentiel("messi"), _joueur_referentiel("mbappe")]
+        )
+        assert len(couples) == 8
+        assert {c["joueur_slug"] for c in couples} == {"messi", "mbappe"}
 
-    def test_garde_raretes_separees(self):
-        annonces = [_annonce("messi", rarete_nom="Limited"), _annonce("messi", rarete_nom="Rare")]
-        couples = _couples_distincts(annonces)
-        assert len(couples) == 2
-        assert {c["rarete"] for c in couples} == {"limited", "rare"}
+    def test_liste_vide_si_aucun_joueur(self):
+        assert _couples_du_referentiel([]) == []
+
+    def test_raretes_et_saisons_personnalisables(self):
+        couples = _couples_du_referentiel(
+            [_joueur_referentiel("messi")], raretes=["limited"], saisons=["CLASSIC"]
+        )
+        assert couples == [
+            {"joueur_slug": "messi", "rarete": "limited", "season_eligibility": "CLASSIC"}
+        ]
 
 
 class TestRemplacerListeLiquidite:
@@ -107,7 +104,7 @@ class TestRemplacerListeLiquidite:
         session.commit()
 
         lignes = lire_liste_liquidite(session)
-        assert [l.joueur_slug for l in lignes] == ["nouveau"]
+        assert [ligne.joueur_slug for ligne in lignes] == ["nouveau"]
 
 
 class TestDerniereMajEtPeremption:

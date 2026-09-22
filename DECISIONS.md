@@ -1421,3 +1421,34 @@ portée du comportement mesuré côté Apps Script par l'utilisateur.
 client GraphQL factice pour couvrir la logique de pagination sur deux
 niveaux — clubs d'une grosse compétition, joueurs d'un gros club). 312
 tests passent.
+
+## 2026-09-22 — `maj_liste_liquidite.py` câblé sur le référentiel de joueurs
+
+Seconde moitié du correctif : `cli/maj_liste_liquidite.py` ne construit
+plus ses couples (joueur, rareté, saison) à partir d'un échantillon
+d'annonces du marché (`annonces_marche_paginees`, triée par fraîcheur) — il
+lit désormais tout `marche.referentiel_joueurs` et mesure la liquidité de
+CHAQUE joueur, sur 2 raretés (limited, rare) × 2 éligibilités de saison
+(CLASSIC, IN_SEASON), qu'il ait ou non une annonce en cours au moment du
+scan. `_couples_distincts` (dédoublonnage d'annonces) est remplacé par
+`_couples_du_referentiel` (produit cartésien joueurs × raretés × saisons) —
+même principe que `liquiditeParCouple_` côté Apps Script.
+
+**Garde de péremption ajoutée, même forme que `liste_perimee`** :
+`referentiel_perime(session, maintenant)` refuse de tourner (sauf
+`--ignorer-peremption`) si le référentiel n'a pas été reconstruit depuis
+`DELAI_RAFRAICHISSEMENT_HEURES`. Éviter de mesurer la liquidité d'un
+référentiel obsolète (joueurs transférés, retraités) silencieusement.
+
+**Coût assumé, pas mesuré contre le réel** : ~26 000 joueurs × 4 = ~106 000
+couples, ~530 appels réseau par lots de 200 alias — de l'ordre de 10
+minutes par estimation (`TAILLE_LOT_HISTORIQUE_PRIX_DEFAUT`, ~1,1 s/lot
+mesuré ailleurs pour un usage différent). Nouveau flag `--limite-joueurs`
+pour un test rapide sans attendre le run complet. **Premier run complet non
+encore lancé** (voir TODO.md/MESURES.md) : le vrai temps d'exécution et
+l'effet réel sur la répartition des propositions restent à observer.
+
+`--premieres`/`annonces_marche_paginees` retirés de ce script (toujours
+utilisés ailleurs — `scan_marche.py`, `premiere_offre_reelle.py` — pas
+touchés). Tests mis à jour : `test_liste_liquidite_l9.py::TestCouplesDistincts`
+remplacé par `TestCouplesDuReferentiel` (4 cas). 313 tests passent.

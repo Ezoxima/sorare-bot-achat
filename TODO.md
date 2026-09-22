@@ -117,6 +117,12 @@ d'énumération marche donc bien côté Python, pas seulement côté Apps
 Script. Pas encore mesurés séparément : nombre de clubs, appels réseau,
 temps d'exécution (voir MESURES.md pour le détail de ce qui manque).
 
-**Reste ouvert : brancher ce référentiel dans `maj_liste_liquidite.py`**
-(voir paragraphe ci-dessus) — c'est la partie qui changera réellement le
-résultat des propositions, pas encore faite.
+**Branché (2026-09-22) : `maj_liste_liquidite.py` mesure maintenant TOUT le
+référentiel**, plus l'échantillon du marché — voir DECISIONS.md. Le
+diagnostic initial de ce TODO (liste liquide biaisée vers les cartes bon
+marché) devrait être corrigé par ce câblage, **mais pas encore vérifié
+contre un run réel** (coût attendu ~10 minutes, ~530 appels — voir le
+docstring de `maj_liste_liquidite.py`). À confirmer au prochain
+`python -m acheteur.cli.maj_liste_liquidite` réel : la répartition par
+rareté de la nouvelle liste liquide, et si les propositions générées par
+`proposer_periodique.py` montrent enfin des joueurs plus chers.
